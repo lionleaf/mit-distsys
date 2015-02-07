@@ -31,8 +31,8 @@ func invert(boolfunc RuneBoolFunc) RuneBoolFunc{
 func Map(value string) *list.List {
     lst := list.New()
     words := strings.FieldsFunc(value,invert(unicode.IsLetter))
-    for i := range words{
-        lst.PushFront(mapreduce.KeyValue{words[i],"1"})
+    for _,word := range words{
+        lst.PushFront(mapreduce.KeyValue{word,"1"})
     }
     return lst
 }
