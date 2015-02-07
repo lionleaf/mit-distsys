@@ -5,8 +5,23 @@ import "fmt"
 import "mapreduce"
 import "strings"
 import "strconv"
+import "unicode"
 
 import "container/list"
+
+type RuneBoolFunc func(rune)bool
+
+//Playing with higher order functions.
+//This is a helper function to make a reverse
+//function for any unicode.isXXX function.
+//I use it because FieldsFunc needs the reverse
+//of unicode.IsLetter
+func invert(boolfunc RuneBoolFunc) RuneBoolFunc{
+    return func(value rune)bool{
+        return !boolfunc(value)
+    }
+}
+
 
 // our simplified version of MapReduce does not supply a
 // key to the Map function, as in the paper; only a value,
@@ -14,14 +29,10 @@ import "container/list"
 // value should be a list of key/value pairs, each represented
 // by a mapreduce.KeyValue.
 func Map(value string) *list.List {
-    lst := list.New();
-    words := strings.Fields(value)
+    lst := list.New()
+    words := strings.FieldsFunc(value,invert(unicode.IsLetter))
     for i := range words{
-        //The solution requires the removal of punctuation,
-        //but for some reason "And" and "and" are counted seperately.
-        word := strings.Trim(words[i],".,;:?!()[]{}\"'")
-
-        lst.PushFront(mapreduce.KeyValue{word,"1"})
+        lst.PushFront(mapreduce.KeyValue{words[i],"1"})
     }
     return lst
 }
