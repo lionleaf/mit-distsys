@@ -11,6 +11,7 @@ import "container/list"
 
 type Worker struct {
 	name   string
+	master string
 	Reduce func(string, *list.List) string
 	Map    func(string) *list.List
 	nRPC   int
@@ -30,6 +31,7 @@ func (wk *Worker) DoJob(arg *DoJobArgs, res *DoJobReply) error {
 		DoReduce(arg.JobNumber, arg.File, arg.NumOtherPhase, wk.Reduce)
 	}
 	res.OK = true
+    //We are ready for work again
 	return nil
 }
 
@@ -49,6 +51,7 @@ func Register(master string, me string) {
 	args := &RegisterArgs{}
 	args.Worker = me
 	var reply RegisterReply
+	fmt.Printf("Worker registering\n")
 	ok := call(master, "MapReduce.Register", args, &reply)
 	if ok == false {
 		fmt.Printf("Register: RPC %s register error\n", master)
@@ -66,6 +69,7 @@ func RunWorker(MasterAddress string, me string,
 	wk.Map = MapFunc
 	wk.Reduce = ReduceFunc
 	wk.nRPC = nRPC
+    wk.master = MasterAddress
 	rpcs := rpc.NewServer()
 	rpcs.Register(wk)
 	os.Remove(me) // only needed for "unix"
