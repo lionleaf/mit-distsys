@@ -51,7 +51,6 @@ func Register(master string, me string) {
 	args := &RegisterArgs{}
 	args.Worker = me
 	var reply RegisterReply
-	fmt.Printf("Worker registering\n")
 	ok := call(master, "MapReduce.Register", args, &reply)
 	if ok == false {
 		fmt.Printf("Register: RPC %s register error\n", master)
