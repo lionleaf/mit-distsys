@@ -7,7 +7,6 @@ import "sync"
 
 type WorkerInfo struct {
 	address string
-	// You can add definitions here.
 }
 
 
@@ -30,14 +29,14 @@ func (mr *MapReduce) KillWorkers() *list.List {
 }
 
 func DoAsyncJob(mr *MapReduce, args DoJobArgs, wg *sync.WaitGroup){
-    defer fmt.Printf("Job complete. wg : %s. job nr: %s\n", wg, args.JobNumber)
-    var returnArgs DoJobReply
-    fmt.Printf("Waiting for worker for job nr %s\n", args.JobNumber)
-    workerID := <-mr.registerChannel
-    fmt.Printf("Staring Job %s on Worker ID: %s\n", args.JobNumber, workerID)
-    call(workerID,"Worker.DoJob", args, &returnArgs)
-    if !returnArgs.OK{
-        fmt.Printf("Async job failed!");
+    returnArgs := DoJobReply{OK: false}
+    workerID := ""
+    for ; !returnArgs.OK; {
+        workerID = <-mr.registerChannel
+        call(workerID,"Worker.DoJob", args, &returnArgs)
+        if !returnArgs.OK{
+            fmt.Printf("Async job failed!");
+        }
     }
     wg.Done()
     mr.registerChannel <- workerID
@@ -53,13 +52,10 @@ func (mr *MapReduce) RunMaster() *list.List {
                         NumOtherPhase:mr.nReduce}
         wg.Add(1);
         go DoAsyncJob(mr, args, &wg)
-	    fmt.Printf("Started map %d\n", i)
     }
 
-	fmt.Printf("All map started. Waiting\n")
     wg.Wait();
 
-	fmt.Printf("Map complete\n")
     for i:=0 ; i<mr.nReduce;i++ {
         args := DoJobArgs{File:mr.file,
                         Operation:Reduce,
@@ -67,11 +63,7 @@ func (mr *MapReduce) RunMaster() *list.List {
                         NumOtherPhase:mr.nMap}
         wg.Add(1);
         go DoAsyncJob(mr, args, &wg)
-	    fmt.Printf("Started reduce %d\n", i)
     }
     wg.Wait();
-
-	fmt.Printf("Reduce complete\n")
-
 	return mr.KillWorkers()
 }
