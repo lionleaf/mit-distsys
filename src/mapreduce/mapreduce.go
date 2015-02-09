@@ -49,148 +49,149 @@ type KeyValue struct {
 	Value string
 }
 
-type MapReduce struct {
-	nMap            int    // Number of Map jobs
-	nReduce         int    // Number of Reduce jobs
-	file            string // Name of input file
-	MasterAddress   string
-	registerChannel chan string
-	DoneChannel     chan bool
-	alive           bool
-	l               net.Listener
-	stats           *list.List
+    type MapReduce struct {
+        nMap            int    // Number of Map jobs
+        nReduce         int    // Number of Reduce jobs
+        file            string // Name of input file
+        MasterAddress   string
+        registerChannel chan string
 
-	// Map of registered workers that you need to keep up to date
-	Workers map[string]*WorkerInfo
+        DoneChannel     chan bool
+        alive           bool
+        l               net.Listener
+        stats           *list.List
 
-	// add any additional state here
-}
+        // Map of registered workers that you need to keep up to date
+        Workers map[string]*WorkerInfo
 
-func InitMapReduce(nmap int, nreduce int,
-	file string, master string) *MapReduce {
-	mr := new(MapReduce)
-	mr.nMap = nmap
-	mr.nReduce = nreduce
-	mr.file = file
-	mr.MasterAddress = master
-	mr.alive = true
-	mr.registerChannel = make(chan string)
-	mr.DoneChannel = make(chan bool)
+        // add any additional state here
+    }
 
-	// initialize any additional state here
-	return mr
-}
+    func InitMapReduce(nmap int, nreduce int,
+        file string, master string) *MapReduce {
+        mr := new(MapReduce)
+        mr.nMap = nmap
+        mr.nReduce = nreduce
+        mr.file = file
+        mr.MasterAddress = master
+        mr.alive = true
+        mr.registerChannel = make(chan string)
+        mr.DoneChannel = make(chan bool)
 
-func MakeMapReduce(nmap int, nreduce int,
-	file string, master string) *MapReduce {
-	mr := InitMapReduce(nmap, nreduce, file, master)
-	mr.StartRegistrationServer()
-	go mr.Run()
-	return mr
-}
+        // initialize any additional state here
+        return mr
+    }
 
-func (mr *MapReduce) Register(args *RegisterArgs, res *RegisterReply) error {
-	DPrintf("Register: worker %s\n", args.Worker)
-	mr.registerChannel <- args.Worker
-	res.OK = true
-	return nil
-}
+    func MakeMapReduce(nmap int, nreduce int,
+        file string, master string) *MapReduce {
+        mr := InitMapReduce(nmap, nreduce, file, master)
+        mr.StartRegistrationServer()
+        go mr.Run()
+        return mr
+    }
 
-func (mr *MapReduce) Shutdown(args *ShutdownArgs, res *ShutdownReply) error {
-	DPrintf("Shutdown: registration server\n")
-	mr.alive = false
-	mr.l.Close() // causes the Accept to fail
-	return nil
-}
+    func (mr *MapReduce) Register(args *RegisterArgs, res *RegisterReply) error {
+        DPrintf("Register: worker %s\n", args.Worker)
+        mr.registerChannel <- args.Worker
+        res.OK = true
+        return nil
+    }
 
-func (mr *MapReduce) StartRegistrationServer() {
-	rpcs := rpc.NewServer()
-	rpcs.Register(mr)
-	os.Remove(mr.MasterAddress) // only needed for "unix"
-	l, e := net.Listen("unix", mr.MasterAddress)
-	if e != nil {
-		log.Fatal("RegstrationServer", mr.MasterAddress, " error: ", e)
-	}
-	mr.l = l
+    func (mr *MapReduce) Shutdown(args *ShutdownArgs, res *ShutdownReply) error {
+        DPrintf("Shutdown: registration server\n")
+        mr.alive = false
+        mr.l.Close() // causes the Accept to fail
+        return nil
+    }
 
-	// now that we are listening on the master address, can fork off
-	// accepting connections to another thread.
-	go func() {
-		for mr.alive {
-			conn, err := mr.l.Accept()
-			if err == nil {
-				go func() {
-					rpcs.ServeConn(conn)
-					conn.Close()
-				}()
-			} else {
-				DPrintf("RegistrationServer: accept error", err)
-				break
-			}
-		}
-		DPrintf("RegistrationServer: done\n")
-	}()
-}
+    func (mr *MapReduce) StartRegistrationServer() {
+        rpcs := rpc.NewServer()
+        rpcs.Register(mr)
+        os.Remove(mr.MasterAddress) // only needed for "unix"
+        l, e := net.Listen("unix", mr.MasterAddress)
+        if e != nil {
+            log.Fatal("RegstrationServer", mr.MasterAddress, " error: ", e)
+        }
+        mr.l = l
 
-// Name of the file that is the input for map job <MapJob>
-func MapName(fileName string, MapJob int) string {
-	return "mrtmp." + fileName + "-" + strconv.Itoa(MapJob)
-}
+        // now that we are listening on the master address, can fork off
+        // accepting connections to another thread.
+        go func() {
+            for mr.alive {
+                conn, err := mr.l.Accept()
+                if err == nil {
+                    go func() {
+                        rpcs.ServeConn(conn)
+                        conn.Close()
+                    }()
+                } else {
+                    DPrintf("RegistrationServer: accept error", err)
+                    break
+                }
+            }
+            DPrintf("RegistrationServer: done\n")
+        }()
+    }
 
-// Split bytes of input file into nMap splits, but split only on white space
-func (mr *MapReduce) Split(fileName string) {
-	fmt.Printf("Split %s\n", fileName)
-	infile, err := os.Open(fileName)
-	if err != nil {
-		log.Fatal("Split: ", err)
-	}
-	defer infile.Close()
-	fi, err := infile.Stat()
-	if err != nil {
-		log.Fatal("Split: ", err)
-	}
-	size := fi.Size()
-	nchunk := size / int64(mr.nMap)
-	nchunk += 1
+    // Name of the file that is the input for map job <MapJob>
+    func MapName(fileName string, MapJob int) string {
+        return "mrtmp." + fileName + "-" + strconv.Itoa(MapJob)
+    }
 
-	outfile, err := os.Create(MapName(fileName, 0))
-	if err != nil {
-		log.Fatal("Split: ", err)
-	}
-	writer := bufio.NewWriter(outfile)
-	m := 1
-	i := 0
+    // Split bytes of input file into nMap splits, but split only on white space
+    func (mr *MapReduce) Split(fileName string) {
+        fmt.Printf("Split %s\n", fileName)
+        infile, err := os.Open(fileName)
+        if err != nil {
+            log.Fatal("Split: ", err)
+        }
+        defer infile.Close()
+        fi, err := infile.Stat()
+        if err != nil {
+            log.Fatal("Split: ", err)
+        }
+        size := fi.Size()
+        nchunk := size / int64(mr.nMap)
+        nchunk += 1
 
-	scanner := bufio.NewScanner(infile)
-	for scanner.Scan() {
-		if int64(i) > nchunk*int64(m) {
-			writer.Flush()
-			outfile.Close()
-			outfile, err = os.Create(MapName(fileName, m))
-			writer = bufio.NewWriter(outfile)
-			m += 1
-		}
-		line := scanner.Text() + "\n"
-		writer.WriteString(line)
-		i += len(line)
-	}
-	writer.Flush()
-	outfile.Close()
-}
+        outfile, err := os.Create(MapName(fileName, 0))
+        if err != nil {
+            log.Fatal("Split: ", err)
+        }
+        writer := bufio.NewWriter(outfile)
+        m := 1
+        i := 0
 
-func ReduceName(fileName string, MapJob int, ReduceJob int) string {
-	return MapName(fileName, MapJob) + "-" + strconv.Itoa(ReduceJob)
-}
+        scanner := bufio.NewScanner(infile)
+        for scanner.Scan() {
+            if int64(i) > nchunk*int64(m) {
+                writer.Flush()
+                outfile.Close()
+                outfile, err = os.Create(MapName(fileName, m))
+                writer = bufio.NewWriter(outfile)
+                m += 1
+            }
+            line := scanner.Text() + "\n"
+            writer.WriteString(line)
+            i += len(line)
+        }
+        writer.Flush()
+        outfile.Close()
+    }
 
-func ihash(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
-}
+    func ReduceName(fileName string, MapJob int, ReduceJob int) string {
+        return MapName(fileName, MapJob) + "-" + strconv.Itoa(ReduceJob)
+    }
 
-// Read split for job, call Map for that split, and create nreduce
-// partitions.
-func DoMap(JobNumber int, fileName string,
+    func ihash(s string) uint32 {
+        h := fnv.New32a()
+        h.Write([]byte(s))
+        return h.Sum32()
+    }
+
+    // Read split for job, call Map for that split, and create nreduce
+    // partitions.
+    func DoMap(JobNumber int, fileName string,
 	nreduce int, Map func(string) *list.List) {
 	name := MapName(fileName, JobNumber)
 	file, err := os.Open(name)
@@ -228,6 +229,8 @@ func DoMap(JobNumber int, fileName string,
 		}
 		file.Close()
 	}
+
+	fmt.Printf("DoMap: Complete %d \n", JobNumber)
 }
 
 func MergeName(fileName string, ReduceJob int) string {
