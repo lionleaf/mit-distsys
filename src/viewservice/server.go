@@ -16,6 +16,13 @@ type ViewServer struct {
 	rpccount int32 // for testing
 	me       string
 
+    currentView View
+    nextView    View //Has to be nil when no new view is pending
+    viewConfirmed bool
+
+    lastSeen map[string]time.Time
+
+    extraServers []string
 
 	// Your declarations here.
 }
@@ -24,19 +31,27 @@ type ViewServer struct {
 // server Ping RPC handler.
 //
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
+    vs.lastSeen[args.Me] = time.Now()
 
-	// Your code here.
+    if vs.currentView.Viewnum == 0{ //First reporting serving becomes first Primary!
+        vs.currentView.Viewnum = 1;
+        vs.currentView.Primary = args.Me;
+    } else if args.Me == vs.currentView.Primary {
+        vs.viewConfirmed = true
+    } else if args.Me != vs.currentView.Backup {
+        vs.extraServers = append(vs.extraServers, args.Me) //Changing views only happen in tick()
+    }
 
+    reply.View = vs.currentView
 	return nil
 }
+
 
 //
 // server Get() RPC handler.
 //
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
-
-	// Your code here.
-
+    reply.View = vs.currentView
 	return nil
 }
 
@@ -47,8 +62,46 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 // accordingly.
 //
 func (vs *ViewServer) tick() {
+    view := &vs.currentView;
 
-	// Your code here.
+    if (view.Backup == "" || vs.timeout(view.Backup)) && len(vs.extraServers) > 0 {
+
+        newBackup := pop(&vs.extraServers)
+
+        vs.nextView = View{Viewnum: view.Viewnum + 1 ,
+                        Primary: view.Primary ,
+                        Backup: newBackup}
+
+    } else if vs.timeout(view.Backup) {
+        vs.nextView = View{Viewnum: view.Viewnum + 1 ,
+                        Primary: view.Primary ,
+                        Backup: ""}
+    } else if vs.timeout(view.Primary) {
+        vs.nextView = View{Viewnum: view.Viewnum + 1 ,
+                        Primary: view.Backup ,
+                        Backup: ""}
+    }
+
+    if vs.nextView.Viewnum != 0 && vs.viewConfirmed {
+        vs.currentView = vs.nextView;
+        vs.nextView.Viewnum = 0;
+    }
+}
+
+func pop(slice *[]string) string {
+    var x string
+    slc := *slice
+    x, slc = slc[len(slc) - 1], slc[:len(slc) - 1]
+    *slice = slc
+    return x
+}
+
+
+func (vs *ViewServer) timeout(server string)bool{
+    if time.Since(vs.lastSeen[server]) > (DeadPings * PingInterval){
+        return true
+    }
+    return false
 }
 
 //
@@ -69,6 +122,9 @@ func (vs *ViewServer) GetRPCCount() int32 {
 func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
+    vs.currentView = View{0,"",""}
+    vs.lastSeen = make(map[string]time.Time)
+    vs.extraServers = make([]string, 0)
 	// Your vs.* initializations here.
 
 	// tell net/rpc about our RPC server and handlers.
