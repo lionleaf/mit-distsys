@@ -20,6 +20,9 @@ type PBServer struct {
 	unreliable bool // for testing
 	me         string
 	vs         *viewservice.Clerk
+    view       *viewservice.View
+    primary     bool
+    backup      bool
 	// Your declarations here.
 }
 
@@ -48,8 +51,23 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 //   manage transfer of state from primary to new backup.
 //
 func (pb *PBServer) tick() {
+    var err error
+    fmt.Printf("Ping viewnum: %d \n", pb.view.Viewnum);
+    *pb.view, err = pb.vs.Ping(pb.view.Viewnum)
+    if(err != nil){
+        fmt.Println("Tick error: %s", err)
+    }
 
-	// Your code here.
+    if pb.view.Primary == pb.me {
+        pb.primary = true
+        pb.backup = false
+    }else if pb.view.Backup == pb.me{
+        pb.primary = false
+        pb.backup = true
+    }else{
+        pb.primary = false
+        pb.backup = false
+    }
 }
 
 // tell the server to shut itself down.
@@ -64,6 +82,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb := new(PBServer)
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
+    pb.view = &viewservice.View{}
 	// Your pb.* initializations here.
 
 	rpcs := rpc.NewServer()
