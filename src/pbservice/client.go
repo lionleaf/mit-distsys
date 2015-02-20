@@ -82,7 +82,9 @@ func (ck *Clerk) Get(key string) string {
         ck.UpdatePrimary()
     }
     reply := GetReply{}
-    call(ck.primary, "PBServer.Get", GetArgs{key}, &reply)
+    for !call(ck.primary, "PBServer.Get", GetArgs{key}, &reply){
+        ck.UpdatePrimary()
+    }
 	return reply.Value
 }
 
@@ -95,7 +97,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
         ck.UpdatePrimary()
     }
     reply := PutAppendReply{}
-    call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply)
+    for !call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply) {
+        ck.UpdatePrimary()
+    }
 }
 
 
