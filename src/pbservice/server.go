@@ -29,19 +29,34 @@ type PBServer struct {
 
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-    reply.Value = pb.data[args.Key]
-    fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
+    if(pb.primary){
+        reply.Value = pb.data[args.Key]
+        fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
+        if pb.view.Backup != "" {
+            call(pb.view.Backup, "PBServer.Get", args, &reply)
+        }
+    }else{
+        //TODO: Return error
+    }
 	return nil
 }
 
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
+    if(!pb.primary){
+        //Early return
+        //TODO: Error?
+        return nil
+    }
     if args.Op == "Put"{
         pb.data[args.Key] = args.Value
     }else if args.Op == "Append" {
         pb.data[args.Key] = pb.data[args.Key] + args.Value
     }else{
         fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
+    }
+    if pb.view.Backup != "" {
+        call(pb.view.Backup, "PBServer.PutAppend", args, &reply)
     }
 
     fmt.Printf("PutAppend(%s, %s,%s)\n", args.Key, args.Value, args.Op)
