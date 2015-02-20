@@ -33,5 +33,13 @@ type GetReply struct {
 	Value string
 }
 
+type TransferDataArgs struct {
+	Data map[string]string
+	// You'll have to add definitions here.
+}
+
+type TransferDataReply struct {
+	Err   Err
+}
 
 // Your RPC definitions here.

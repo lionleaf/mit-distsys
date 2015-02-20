@@ -21,15 +21,15 @@ type PBServer struct {
 	me         string
 	vs         *viewservice.Clerk
     view       *viewservice.View
-    primary     bool
-    backup      bool
+    primary     string
+    backup      string
     data        map[string]string
 	// Your declarations here.
 }
 
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-    if(pb.primary){
+    if(pb.primary == pb.me){
         reply.Value = pb.data[args.Key]
         fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
         if pb.view.Backup != "" {
@@ -43,7 +43,7 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-    if(!pb.primary){
+    if(pb.primary != pb.me && pb.backup != pb.me){
         //Early return
         //TODO: Error?
         return nil
@@ -55,8 +55,9 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
     }else{
         fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
     }
-    if pb.view.Backup != "" {
-        call(pb.view.Backup, "PBServer.PutAppend", args, &reply)
+    if pb.primary == pb.me && pb.backup != "" {
+        call(pb.backup, "PBServer.PutAppend", args, &reply)
+        fmt.Printf("Relaying putappend to backup\n")
     }
 
     fmt.Printf("PutAppend(%s, %s,%s)\n", args.Key, args.Value, args.Op)
@@ -77,16 +78,27 @@ func (pb *PBServer) tick() {
         fmt.Println("Tick error: %s", err)
     }
 
-    if pb.view.Primary == pb.me {
-        pb.primary = true
-        pb.backup = false
-    }else if pb.view.Backup == pb.me{
-        pb.primary = false
-        pb.backup = true
-    }else{
-        pb.primary = false
-        pb.backup = false
+    if(pb.view.Primary == pb.me && pb.backup != pb.view.Backup && pb.view.Backup != ""){
+        //New Backup
+        pb.transferDataToBackup()
     }
+
+
+    pb.primary = pb.view.Primary
+    pb.backup = pb.view.Backup
+}
+
+func (pb *PBServer) transferDataToBackup(){
+    fmt.Println("NEW BACKUP! Transfering data")
+    reply := TransferDataReply{}
+    call(pb.view.Backup, "PBServer.ReceiveDatabase", TransferDataArgs{pb.data}, &reply)
+}
+
+func (pb *PBServer) ReceiveDatabase(args *TransferDataArgs, reply *TransferDataReply) error {
+    pb.data = args.Data
+    reply.Err = OK
+    fmt.Println("DATA RECEIVED")
+    return nil
 }
 
 // tell the server to shut itself down.
