@@ -23,23 +23,22 @@ type PBServer struct {
     view       *viewservice.View
     primary     bool
     backup      bool
+    data        map[string]string
 	// Your declarations here.
 }
 
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-
-	// Your code here.
-
+    reply.Value = pb.data[args.Key]
+    fmt.Printf("Getting %s\n", args.Key)
 	return nil
 }
 
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
+    pb.data[args.Key] = args.Value
 
-	// Your code here.
-
-
+    fmt.Printf("PutAppend(%s, %s)\n", args.Key, args.Value)
 	return nil
 }
 
@@ -83,6 +82,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
     pb.view = &viewservice.View{}
+    pb.data = make(map[string]string)
 	// Your pb.* initializations here.
 
 	rpcs := rpc.NewServer()

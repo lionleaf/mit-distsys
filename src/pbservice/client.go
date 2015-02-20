@@ -72,17 +72,19 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
 
-	// Your code here.
-
-	return "???"
+    primary := ck.vs.Primary()
+    reply := GetReply{}
+    call(primary, "PBServer.Get", GetArgs{key}, &reply)
+	return reply.Value
 }
 
 //
 // send a Put or Append RPC
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-
-	// Your code here.
+    primary := ck.vs.Primary()
+    reply := PutAppendReply{}
+    call(primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value}, &reply)
 }
 
 //
