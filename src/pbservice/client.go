@@ -10,6 +10,7 @@ import "math/big"
 
 type Clerk struct {
 	vs *viewservice.Clerk
+    primary string
 	// Your declarations here
 }
 
@@ -63,6 +64,11 @@ func call(srv string, rpcname string,
 	return false
 }
 
+/* Update Primary with the newest one from the viewserver*/
+func (ck *Clerk) UpdatePrimary(){
+    ck.primary = ck.vs.Primary()
+}
+
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -72,20 +78,26 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
 
-    primary := ck.vs.Primary()
+    if(ck.primary == ""){
+        ck.UpdatePrimary()
+    }
     reply := GetReply{}
-    call(primary, "PBServer.Get", GetArgs{key}, &reply)
+    call(ck.primary, "PBServer.Get", GetArgs{key}, &reply)
 	return reply.Value
 }
+
 
 //
 // send a Put or Append RPC
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-    primary := ck.vs.Primary()
+    if(ck.primary == ""){
+        ck.UpdatePrimary()
+    }
     reply := PutAppendReply{}
-    call(primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply)
+    call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply)
 }
+
 
 //
 // tell the primary to update key's value.
