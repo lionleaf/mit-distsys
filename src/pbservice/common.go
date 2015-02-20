@@ -10,8 +10,9 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
+	Key     string
+	Value   string
+	Op      string
 	// You'll have to add definitions here.
 
 	// Field names must start with capital letters,

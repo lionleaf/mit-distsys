@@ -84,7 +84,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
     primary := ck.vs.Primary()
     reply := PutAppendReply{}
-    call(primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value}, &reply)
+    call(primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply)
 }
 
 //

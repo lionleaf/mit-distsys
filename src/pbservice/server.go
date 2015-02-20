@@ -30,15 +30,21 @@ type PBServer struct {
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     reply.Value = pb.data[args.Key]
-    fmt.Printf("Getting %s\n", args.Key)
+    fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
 	return nil
 }
 
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-    pb.data[args.Key] = args.Value
+    if args.Op == "Put"{
+        pb.data[args.Key] = args.Value
+    }else if args.Op == "Append" {
+        pb.data[args.Key] = pb.data[args.Key] + args.Value
+    }else{
+        fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
+    }
 
-    fmt.Printf("PutAppend(%s, %s)\n", args.Key, args.Value)
+    fmt.Printf("PutAppend(%s, %s,%s)\n", args.Key, args.Value, args.Op)
 	return nil
 }
 
@@ -51,7 +57,6 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 //
 func (pb *PBServer) tick() {
     var err error
-    fmt.Printf("Ping viewnum: %d \n", pb.view.Viewnum);
     *pb.view, err = pb.vs.Ping(pb.view.Viewnum)
     if(err != nil){
         fmt.Println("Tick error: %s", err)
