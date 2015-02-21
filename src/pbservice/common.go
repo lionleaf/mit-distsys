@@ -1,7 +1,7 @@
 package pbservice
 
 const (
-	OK             = "OK"
+	OK             = ""
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongServer = "ErrWrongServer"
 )
@@ -13,6 +13,7 @@ type PutAppendArgs struct {
 	Key     string
 	Value   string
 	Op      string
+    UID     int64
 	// You'll have to add definitions here.
 
 	// Field names must start with capital letters,
@@ -25,6 +26,7 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
+    UID int64
 	// You'll have to add definitions here.
 }
 
@@ -35,6 +37,7 @@ type GetReply struct {
 
 type TransferDataArgs struct {
 	Data map[string]string
+    Executed map[int64]bool
 	// You'll have to add definitions here.
 }
 

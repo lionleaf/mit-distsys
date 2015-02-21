@@ -3,7 +3,7 @@ package pbservice
 import "viewservice"
 import "net/rpc"
 import "fmt"
-
+import "time"
 import "crypto/rand"
 import "math/big"
 
@@ -82,8 +82,16 @@ func (ck *Clerk) Get(key string) string {
         ck.UpdatePrimary()
     }
     reply := GetReply{}
-    for !call(ck.primary, "PBServer.Get", GetArgs{key}, &reply){
+    uid := nrand()
+    fmt.Printf("Get(%s). Primary: %s \n", key, ck.primary)
+    for !call(ck.primary, "PBServer.Get", GetArgs{Key: key, UID: uid}, &reply){
+        fmt.Printf("Retrying Get(%s). Err: %s. Primary: %s \n", key, reply.Err, ck.primary)
+        time.Sleep(viewservice.PingInterval)
         ck.UpdatePrimary()
+
+        if (ck.primary == ""){
+            return ""
+        }
     }
 	return reply.Value
 }
@@ -97,8 +105,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
         ck.UpdatePrimary()
     }
     reply := PutAppendReply{}
-    for !call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op}, &reply) {
+    uid := nrand()
+    for !call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op, UID: uid}, &reply) {
+        fmt.Printf("Retrying %s(%s)=%s Err: %s. Primary: %s\n", op, key, value, reply.Err, ck.primary)
+        time.Sleep(viewservice.PingInterval)
         ck.UpdatePrimary()
+        fmt.Printf("(Potentially new) Primary: %s\n", ck.primary)
+
     }
 }
 

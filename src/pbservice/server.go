@@ -23,47 +23,114 @@ type PBServer struct {
     view       *viewservice.View
     primary     string
     backup      string
+    lock    *sync.Mutex
     data        map[string]string
-	// Your declarations here.
+    executed    map[int64]bool      //executed[uid] is true if the command with said uid has been executed
 }
 
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-    if(pb.primary == pb.me){
-        reply.Value = pb.data[args.Key]
-        fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
-        if pb.view.Backup != "" {
-            call(pb.view.Backup, "PBServer.Get", args, &reply)
-        }
-    }else{
-        //TODO: Return error
+    if(pb.primary != pb.me ){
+        reply.Err = ErrWrongServer
+        return nil
+    }
+
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
+
+    for pb.primary == pb.me &&
+        pb.backup != "" &&
+        !call(pb.backup, "PBServer.GetBackup", args, &reply){
+            fmt.Printf("Error relaying to backup, rechecking viewserver\n")
+            time.Sleep(viewservice.PingInterval)
+            pb.tick()  //TODO: This seems ugly
+    }
+
+    reply.Value = pb.data[args.Key]
+    fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
+
+	return nil
+}
+
+func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
+    if(pb.backup != pb.me ){
+        reply.Err = ErrWrongServer
+        return nil
     }
 	return nil
 }
 
-
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-    if(pb.primary != pb.me && pb.backup != pb.me){
-        //Early return
-        //TODO: Error?
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
+    if(pb.primary != pb.me ){
+        reply.Err = ErrWrongServer
         return nil
     }
-    if args.Op == "Put"{
+
+    if(pb.executed[args.UID]){
+        //No error, just return normally as the request has been handled
+        reply.Err = OK
+        return nil
+    }
+
+    for pb.primary == pb.me &&
+        pb.backup != "" &&
+        !call(pb.backup, "PBServer.PutAppendBackup", args, &reply){
+            fmt.Printf("Error relaying to backup, rechecking viewserver\n")
+            time.Sleep(viewservice.PingInterval)
+            pb.tick()  //TODO: This seems ugly
+    }
+
+    if args.Op == "Put" {
         pb.data[args.Key] = args.Value
+
     }else if args.Op == "Append" {
         pb.data[args.Key] = pb.data[args.Key] + args.Value
+
     }else{
         fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
     }
-    if pb.primary == pb.me && pb.backup != "" {
-        call(pb.backup, "PBServer.PutAppend", args, &reply)
-        fmt.Printf("Relaying putappend to backup\n")
-    }
 
-    fmt.Printf("PutAppend(%s, %s,%s)\n", args.Key, args.Value, args.Op)
+    pb.executed[args.UID] = true
+    fmt.Printf("Primary executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
+    reply.Err = OK
 	return nil
 }
 
+
+func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) error {
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
+    if(pb.backup != pb.me ){
+        reply.Err = ErrWrongServer
+        return nil
+    }
+
+    if(pb.executed[args.UID]){
+        //No error, just return normally as the request has been handled
+        reply.Err = OK
+        return nil
+    }
+
+    if args.Op == "Put" {
+        pb.data[args.Key] = args.Value
+
+    }else if args.Op == "Append" {
+        pb.data[args.Key] = pb.data[args.Key] + args.Value
+
+    }else{
+        fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
+    }
+
+    pb.executed[args.UID] = true
+    reply.Err = OK
+    fmt.Printf("Backup executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
+	return nil
+}
 
 //
 // ping the viewserver periodically.
@@ -91,11 +158,13 @@ func (pb *PBServer) tick() {
 func (pb *PBServer) transferDataToBackup(){
     fmt.Println("NEW BACKUP! Transfering data")
     reply := TransferDataReply{}
-    call(pb.view.Backup, "PBServer.ReceiveDatabase", TransferDataArgs{pb.data}, &reply)
+    args := TransferDataArgs{Data:pb.data, Executed: pb.executed}
+    call(pb.view.Backup, "PBServer.ReceiveDatabase", args, &reply)
 }
 
 func (pb *PBServer) ReceiveDatabase(args *TransferDataArgs, reply *TransferDataReply) error {
     pb.data = args.Data
+    pb.executed = args.Executed
     reply.Err = OK
     fmt.Println("DATA RECEIVED")
     return nil
@@ -114,7 +183,9 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
     pb.view = &viewservice.View{}
+    pb.lock = &sync.Mutex{}
     pb.data = make(map[string]string)
+    pb.executed = make(map[int64]bool)
 	// Your pb.* initializations here.
 
 	rpcs := rpc.NewServer()
