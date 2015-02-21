@@ -3,13 +3,14 @@ package pbservice
 import "viewservice"
 import "net/rpc"
 import "fmt"
-
+import "time"
 import "crypto/rand"
 import "math/big"
 
 
 type Clerk struct {
 	vs *viewservice.Clerk
+    primary string
 	// Your declarations here
 }
 
@@ -63,6 +64,11 @@ func call(srv string, rpcname string,
 	return false
 }
 
+/* Update Primary with the newest one from the viewserver*/
+func (ck *Clerk) UpdatePrimary(){
+    ck.primary = ck.vs.Primary()
+}
+
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -72,18 +78,43 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
 
-	// Your code here.
+    if(ck.primary == ""){
+        ck.UpdatePrimary()
+    }
+    reply := GetReply{}
+    uid := nrand()
+    fmt.Printf("Get(%s). Primary: %s \n", key, ck.primary)
+    for !call(ck.primary, "PBServer.Get", GetArgs{Key: key, UID: uid}, &reply){
+        fmt.Printf("Retrying Get(%s). Err: %s. Primary: %s \n", key, reply.Err, ck.primary)
+        time.Sleep(viewservice.PingInterval)
+        ck.UpdatePrimary()
 
-	return "???"
+        if (ck.primary == ""){
+            return ""
+        }
+    }
+	return reply.Value
 }
+
 
 //
 // send a Put or Append RPC
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+    if(ck.primary == ""){
+        ck.UpdatePrimary()
+    }
+    reply := PutAppendReply{}
+    uid := nrand()
+    for !call(ck.primary, "PBServer.PutAppend", PutAppendArgs{Key:key, Value:value, Op:op, UID: uid}, &reply) {
+        fmt.Printf("Retrying %s(%s)=%s Err: %s. Primary: %s\n", op, key, value, reply.Err, ck.primary)
+        time.Sleep(viewservice.PingInterval)
+        ck.UpdatePrimary()
+        fmt.Printf("(Potentially new) Primary: %s\n", ck.primary)
 
-	// Your code here.
+    }
 }
+
 
 //
 // tell the primary to update key's value.
