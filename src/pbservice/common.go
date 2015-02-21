@@ -10,11 +10,11 @@ const (
 
 type Err string
 
-const debug = true
+const debug = false
 
 func DebugPrintf(str string, v ...interface{}){
     if debug {
-        fmt.Printf(str, v)
+        fmt.Printf(str, v...)
     }
 }
 
