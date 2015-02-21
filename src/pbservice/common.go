@@ -1,5 +1,7 @@
 package pbservice
 
+import "fmt"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -7,6 +9,14 @@ const (
 )
 
 type Err string
+
+const debug = true
+
+func DebugPrintf(str string, v ...interface{}){
+    if debug {
+        fmt.Printf(str, v)
+    }
+}
 
 // Put or Append
 type PutAppendArgs struct {

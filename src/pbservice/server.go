@@ -1,7 +1,6 @@
 package pbservice
 
 import "net"
-import "fmt"
 import "net/rpc"
 import "log"
 import "time"
@@ -33,6 +32,7 @@ type PBServer struct {
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
+        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 
@@ -43,13 +43,13 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     for pb.primary == pb.me &&
         pb.backup != "" &&
         !call(pb.backup, "PBServer.GetBackup", args, &reply){
-            fmt.Printf("Error relaying to backup, rechecking viewserver\n")
+            DebugPrintf("Error relaying to backup, rechecking viewserver\n")
             time.Sleep(viewservice.PingInterval)
             pb.tick()  //TODO: This seems ugly
     }
 
     reply.Value = pb.data[args.Key]
-    fmt.Printf("Get(%s)=%s\n", args.Key, reply.Value)
+    DebugPrintf("Get(%s)=%s\n", args.Key, reply.Value)
 
 	return nil
 }
@@ -57,6 +57,7 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
+        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 	return nil
@@ -68,13 +69,13 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
-        fmt.Printf("Wrong server for %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
+        DebugPrintf("Wrong server for %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
         pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 
     if(pb.executed[args.UID]){
-        fmt.Printf("ALREADY EXECUTED %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
+        DebugPrintf("ALREADY EXECUTED %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
         //No error, just return normally as the request has been handled
         reply.Err = OK
         return  nil
@@ -83,7 +84,7 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
     for pb.primary == pb.me &&
         pb.backup != "" &&
         !call(pb.backup, "PBServer.PutAppendBackup", args, &reply){
-            fmt.Printf("Error relaying to backup, rechecking viewserver\n")
+            DebugPrintf("Error relaying to backup, rechecking viewserver\n")
             time.Sleep(viewservice.PingInterval)
             pb.tick()  //TODO: This seems ugly
     }
@@ -93,11 +94,11 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
     }else if args.Op == "Append" {
         pb.data[args.Key] = pb.data[args.Key] + args.Value
     }else{
-        fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
+        DebugPrintf("Malformed PutAppend operation: %s\n", args.Op)
     }
 
     pb.executed[args.UID] = true
-    fmt.Printf("Primary executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
+    DebugPrintf("Primary executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
     reply.Err = OK
 	return nil
 }
@@ -106,7 +107,7 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) error {
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
-        fmt.Printf("Wrong server for %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
+        DebugPrintf("Wrong server for %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
         pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
@@ -118,7 +119,7 @@ func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) 
 
     if(pb.executed[args.UID]){
         //No error, just return normally as the request has been handled
-        fmt.Printf("ALREADY EXECUTED %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
+        DebugPrintf("ALREADY EXECUTED %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
         reply.Err = OK
         return nil
     }
@@ -130,12 +131,12 @@ func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) 
         pb.data[args.Key] = pb.data[args.Key] + args.Value
 
     }else{
-        fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
+        DebugPrintf("Malformed PutAppend operation: %s\n", args.Op)
     }
 
     pb.executed[args.UID] = true
     reply.Err = OK
-    fmt.Printf("Backup executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
+    DebugPrintf("Backup executed %s(%s)=%s\n", args.Op, args.Key, args.Value)
 	return nil
 }
 
@@ -149,7 +150,7 @@ func (pb *PBServer) tick() {
     var err error
     *pb.view, err = pb.vs.Ping(pb.view.Viewnum)
     if(err != nil){
-        fmt.Println("Tick error: %s", err)
+        DebugPrintf("Tick error: %s\n", err)
     }
 
     if(pb.view.Primary == pb.me && pb.backup != pb.view.Backup && pb.view.Backup != ""){
@@ -163,7 +164,7 @@ func (pb *PBServer) tick() {
 }
 
 func (pb *PBServer) transferDataToBackup(){
-    fmt.Println("NEW BACKUP! Transfering data")
+    DebugPrintf("NEW BACKUP! Transfering data\n")
     reply := TransferDataReply{}
     args := TransferDataArgs{Data:pb.data, Executed: pb.executed}
     call(pb.view.Backup, "PBServer.ReceiveDatabase", args, &reply)
@@ -173,7 +174,7 @@ func (pb *PBServer) ReceiveDatabase(args *TransferDataArgs, reply *TransferDataR
     pb.data = args.Data
     pb.executed = args.Executed
     reply.Err = OK
-    fmt.Println("DATA RECEIVED")
+    DebugPrintf("DATA RECEIVED\n")
     return nil
 }
 
@@ -221,7 +222,7 @@ func StartServer(vshost string, me string) *PBServer {
 					f, _ := c1.File()
 					err := syscall.Shutdown(int(f.Fd()), syscall.SHUT_WR)
 					if err != nil {
-						fmt.Printf("shutdown: %v\n", err)
+						DebugPrintf("shutdown: %v\n", err)
 					}
 					go rpcs.ServeConn(conn)
 				} else {
@@ -231,7 +232,7 @@ func StartServer(vshost string, me string) *PBServer {
 				conn.Close()
 			}
 			if err != nil && pb.dead == false {
-				fmt.Printf("PBServer(%v) accept: %v\n", me, err.Error())
+				DebugPrintf("PBServer(%v) accept: %v\n", me, err.Error())
 				pb.kill()
 			}
 		}
