@@ -23,8 +23,8 @@ type PBServer struct {
     view       *viewservice.View
     primary     string
     backup      string
-    lock        *sync.Mutex
-    ticklock    *sync.Mutex
+    requestlock *sync.Mutex //A lock to make sure we don't have multiple requests doing stuff at the same time
+    ticklock    *sync.Mutex //A lock to make sure we don't process requests during backup setup
     data        map[string]string
     executed    map[int64]bool      //executed[uid] is true if the command with said uid has been executed
 }
@@ -36,8 +36,8 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
         return errors.New(string(reply.Err))
     }
 
-    pb.lock.Lock()
-    defer pb.lock.Unlock()
+    pb.requestlock.Lock()
+    defer pb.requestlock.Unlock()
 
     pb.ticklock.Lock()
     defer pb.ticklock.Unlock()
@@ -67,9 +67,9 @@ func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
 }
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-    pb.lock.Lock()
+    pb.requestlock.Lock()
     pb.ticklock.Lock()
-    defer pb.lock.Unlock()
+    defer pb.requestlock.Unlock()
     defer pb.ticklock.Unlock()
 
     if(pb.primary != pb.me ){
@@ -113,8 +113,8 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 //RPC function for the Primary calls on the Backup to make it replicate a Put/Append
 func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) error {
     //Synchronize this function
-    pb.lock.Lock()
-    defer pb.lock.Unlock()
+    pb.requestlock.Lock()
+    defer pb.requestlock.Unlock()
 
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
@@ -206,7 +206,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
     pb.view = &viewservice.View{}
-    pb.lock = &sync.Mutex{}
+    pb.requestlock = &sync.Mutex{}
     pb.ticklock = &sync.Mutex{}
     pb.data = make(map[string]string)
     pb.executed = make(map[int64]bool)
