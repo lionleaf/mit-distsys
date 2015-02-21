@@ -23,7 +23,8 @@ type PBServer struct {
     view       *viewservice.View
     primary     string
     backup      string
-    lock    *sync.Mutex
+    lock        *sync.Mutex
+    ticklock    *sync.Mutex
     data        map[string]string
     executed    map[int64]bool      //executed[uid] is true if the command with said uid has been executed
 }
@@ -32,7 +33,6 @@ type PBServer struct {
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
-        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 
@@ -44,8 +44,9 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
         pb.backup != "" &&
         !call(pb.backup, "PBServer.GetBackup", args, &reply){
             DebugPrintf("Error relaying to backup, rechecking viewserver\n")
+            pb.lock.Unlock()
             time.Sleep(viewservice.PingInterval)
-            pb.tick()  //TODO: This seems ugly
+            pb.lock.Lock()
     }
 
     reply.Value = pb.data[args.Key]
@@ -54,10 +55,10 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
+//RPC for a Get request to the backup
 func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
-        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 	return nil
@@ -70,8 +71,17 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
         DebugPrintf("Wrong server for %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
-        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
+    }
+
+
+    for pb.primary == pb.me &&
+        pb.backup != "" &&
+        !call(pb.backup, "PBServer.PutAppendBackup", args, &reply){
+            DebugPrintf("Error relaying to backup, rechecking viewserver\n")
+            pb.lock.Unlock()
+            time.Sleep(viewservice.PingInterval)
+            pb.lock.Lock()
     }
 
     if(pb.executed[args.UID]){
@@ -79,14 +89,6 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
         //No error, just return normally as the request has been handled
         reply.Err = OK
         return  nil
-    }
-
-    for pb.primary == pb.me &&
-        pb.backup != "" &&
-        !call(pb.backup, "PBServer.PutAppendBackup", args, &reply){
-            DebugPrintf("Error relaying to backup, rechecking viewserver\n")
-            time.Sleep(viewservice.PingInterval)
-            pb.tick()  //TODO: This seems ugly
     }
 
     if args.Op == "Put" {
@@ -104,17 +106,18 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 }
 
 
+//RPC function for the Primary calls on the Backup to make it replicate a Put/Append
 func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) error {
+    //Synchronize this function
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
         DebugPrintf("Wrong server for %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
-        pb.tick()  //TODO: This seems ugly
         return errors.New(string(reply.Err))
     }
 
-    //Synchronize the rest of this function
-    pb.lock.Lock()
-    defer pb.lock.Unlock()
 
 
     if(pb.executed[args.UID]){
@@ -147,6 +150,10 @@ func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) 
 //   manage transfer of state from primary to new backup.
 //
 func (pb *PBServer) tick() {
+    //As tick is called from within locked code we need a separate lock to avoid deadlock
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
     var err error
     *pb.view, err = pb.vs.Ping(pb.view.Viewnum)
     if(err != nil){
@@ -171,6 +178,10 @@ func (pb *PBServer) transferDataToBackup(){
 }
 
 func (pb *PBServer) ReceiveDatabase(args *TransferDataArgs, reply *TransferDataReply) error {
+    //Synchronize this function
+    pb.lock.Lock()
+    defer pb.lock.Unlock()
+
     pb.data = args.Data
     pb.executed = args.Executed
     reply.Err = OK
@@ -192,6 +203,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.vs = viewservice.MakeClerk(me, vshost)
     pb.view = &viewservice.View{}
     pb.lock = &sync.Mutex{}
+    pb.ticklock = &sync.Mutex{}
     pb.data = make(map[string]string)
     pb.executed = make(map[int64]bool)
 	// Your pb.* initializations here.

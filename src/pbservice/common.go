@@ -10,7 +10,7 @@ const (
 
 type Err string
 
-const debug = false
+const debug = true
 
 func DebugPrintf(str string, v ...interface{}){
     if debug {
@@ -24,10 +24,6 @@ type PutAppendArgs struct {
 	Value   string
 	Op      string
     UID     int64
-	// You'll have to add definitions here.
-
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 type PutAppendReply struct {
@@ -37,7 +33,6 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
     UID int64
-	// You'll have to add definitions here.
 }
 
 type GetReply struct {
@@ -48,11 +43,8 @@ type GetReply struct {
 type TransferDataArgs struct {
 	Data map[string]string
     Executed map[int64]bool
-	// You'll have to add definitions here.
 }
 
 type TransferDataReply struct {
 	Err   Err
 }
-
-// Your RPC definitions here.
