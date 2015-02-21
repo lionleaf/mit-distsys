@@ -39,14 +39,16 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     pb.lock.Lock()
     defer pb.lock.Unlock()
 
+    pb.ticklock.Lock()
+    defer pb.ticklock.Unlock()
 
     for pb.primary == pb.me &&
         pb.backup != "" &&
         !call(pb.backup, "PBServer.GetBackup", args, &reply){
             DebugPrintf("Error relaying to backup, rechecking viewserver\n")
-            pb.lock.Unlock()
+            pb.ticklock.Unlock()
             time.Sleep(viewservice.PingInterval)
-            pb.lock.Lock()
+            pb.ticklock.Lock()
     }
 
     reply.Value = pb.data[args.Key]
@@ -66,7 +68,9 @@ func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
     pb.lock.Lock()
+    pb.ticklock.Lock()
     defer pb.lock.Unlock()
+    defer pb.ticklock.Unlock()
 
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
@@ -79,9 +83,9 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
         pb.backup != "" &&
         !call(pb.backup, "PBServer.PutAppendBackup", args, &reply){
             DebugPrintf("Error relaying to backup, rechecking viewserver\n")
-            pb.lock.Unlock()
+            pb.ticklock.Unlock()
             time.Sleep(viewservice.PingInterval)
-            pb.lock.Lock()
+            pb.ticklock.Lock()
     }
 
     if(pb.executed[args.UID]){
@@ -151,8 +155,8 @@ func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) 
 //
 func (pb *PBServer) tick() {
     //As tick is called from within locked code we need a separate lock to avoid deadlock
-    pb.lock.Lock()
-    defer pb.lock.Unlock()
+    pb.ticklock.Lock()
+    defer pb.ticklock.Unlock()
 
     var err error
     *pb.view, err = pb.vs.Ping(pb.view.Viewnum)
@@ -179,8 +183,8 @@ func (pb *PBServer) transferDataToBackup(){
 
 func (pb *PBServer) ReceiveDatabase(args *TransferDataArgs, reply *TransferDataReply) error {
     //Synchronize this function
-    pb.lock.Lock()
-    defer pb.lock.Unlock()
+    pb.ticklock.Lock()
+    defer pb.ticklock.Unlock()
 
     pb.data = args.Data
     pb.executed = args.Executed
