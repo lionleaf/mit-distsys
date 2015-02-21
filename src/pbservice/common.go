@@ -1,7 +1,7 @@
 package pbservice
 
 const (
-	OK             = ""
+	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongServer = "ErrWrongServer"
 )

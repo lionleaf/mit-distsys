@@ -111,7 +111,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
         time.Sleep(viewservice.PingInterval)
         ck.UpdatePrimary()
         fmt.Printf("(Potentially new) Primary: %s\n", ck.primary)
-
     }
 }
 

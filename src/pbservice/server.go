@@ -10,6 +10,7 @@ import "sync"
 import "os"
 import "syscall"
 import "math/rand"
+import "errors"
 
 
 
@@ -32,7 +33,7 @@ type PBServer struct {
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
-        return nil
+        return errors.New(string(reply.Err))
     }
 
     pb.lock.Lock()
@@ -56,7 +57,7 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 func (pb *PBServer) GetBackup(args *GetArgs, reply *GetReply) error {
     if(pb.backup != pb.me ){
         reply.Err = ErrWrongServer
-        return nil
+        return errors.New(string(reply.Err))
     }
 	return nil
 }
@@ -67,13 +68,16 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
     if(pb.primary != pb.me ){
         reply.Err = ErrWrongServer
-        return nil
+        fmt.Printf("Wrong server for %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
+        pb.tick()  //TODO: This seems ugly
+        return errors.New(string(reply.Err))
     }
 
     if(pb.executed[args.UID]){
+        fmt.Printf("ALREADY EXECUTED %s(%s)=%s -- primary\n", args.Op, args.Key, args.Value)
         //No error, just return normally as the request has been handled
         reply.Err = OK
-        return nil
+        return  nil
     }
 
     for pb.primary == pb.me &&
@@ -86,10 +90,8 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
     if args.Op == "Put" {
         pb.data[args.Key] = args.Value
-
     }else if args.Op == "Append" {
         pb.data[args.Key] = pb.data[args.Key] + args.Value
-
     }else{
         fmt.Printf("Malformed PutAppend operation: %s\n", args.Op)
     }
@@ -102,16 +104,21 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
 
 func (pb *PBServer) PutAppendBackup(args *PutAppendArgs, reply *PutAppendReply) error {
+    if(pb.backup != pb.me ){
+        reply.Err = ErrWrongServer
+        fmt.Printf("Wrong server for %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
+        pb.tick()  //TODO: This seems ugly
+        return errors.New(string(reply.Err))
+    }
+
+    //Synchronize the rest of this function
     pb.lock.Lock()
     defer pb.lock.Unlock()
 
-    if(pb.backup != pb.me ){
-        reply.Err = ErrWrongServer
-        return nil
-    }
 
     if(pb.executed[args.UID]){
         //No error, just return normally as the request has been handled
+        fmt.Printf("ALREADY EXECUTED %s(%s)=%s -- backup\n", args.Op, args.Key, args.Value)
         reply.Err = OK
         return nil
     }
