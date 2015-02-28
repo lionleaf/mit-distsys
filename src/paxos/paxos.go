@@ -32,12 +32,24 @@ import (
 	"syscall"
 )
 
-const debug = false
+var log_mu sync.Mutex
 
-func DebugPrintf(str string, v ...interface{}) {
-	if debug {
-		fmt.Printf(str, v...)
+const DEBUG = true
+
+func (px *Paxos) Logf(format string, a ...interface{}) {
+	if !DEBUG {
+		return
 	}
+
+	log_mu.Lock()
+	defer log_mu.Unlock()
+
+	me := px.me
+
+	fmt.Printf("\x1b[%dm", (me%6)+31)
+	fmt.Printf("S#%d : ", me)
+	fmt.Printf(format+"\n", a...)
+	fmt.Printf("\x1b[0m")
 }
 
 // px.Status() return values, indicating
@@ -71,10 +83,13 @@ type Paxos struct {
 	majority   int
 
 	decided map[int]bool
+
 	//Proposer data, organized in maps
 	n_highest map[int]int
 
 	acceptor map[int]*AcceptorInstance
+
+	locks map[int]*sync.Mutex
 
 	//Map of the values
 	val map[int]interface{}
@@ -217,25 +232,20 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	if px.decided[seq] {
-		DebugPrintf("Status decided! \n")
+		px.Logf("Status decided! \n")
 		return Decided, px.val[seq]
 	}
-	DebugPrintf("Status pending! \n")
+	px.Logf("Status pending! \n")
 	return Pending, nil
 }
 
 func rndAbove(n int) int {
-	//TODO: Fix
-	return int(rand.Int31n(100000))
-}
-
-type rpcReturn struct {
-	OK  bool
-	ret interface{}
+	randomSpace := int32(1 << 30)
+	value := n + int(rand.Int31n(randomSpace))
+	return int(value)
 }
 
 func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority bool, ok_responses []PrepAcceptRet) {
-
 	//Make it buffered so we don't have goroutines blocked forever.
 	//There will never be more than n_peers, so we are safe.
 	done := make(chan bool, px.n_peers)
@@ -246,11 +256,12 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 	ok_resp := make([]PrepAcceptRet, 0, px.n_peers)
 
 	// Start a goroutine with an rpc to every peer
-	for _, peer := range px.peers {
+	for i := range px.peers {
+		peer := px.peers[i]
 		go func() {
 			ret := PrepAcceptRet{}
-			ok := call(peer, rpcname, args, &ret)
-			if ok {
+			call(peer, rpcname, args, &ret)
+			if ret.OK {
 				n_ok++
 				ok_resp = append(ok_resp, ret)
 			} else {
@@ -275,15 +286,14 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 }
 
 func (px *Paxos) Propose(val interface{}, Seq int) {
-	for !px.decided[Seq] {
+	decided := false
+	for !decided {
 		n := rndAbove(px.n_highest[Seq])
-		DebugPrintf("\nN: %d \n", n)
 
 		prepMajority, prepOKResponses := px.attemptRPCMajority("Paxos.Prepare", PrepareArgs{n, Seq})
 
 		if prepMajority {
-			DebugPrintf("Got majority prepare OK! \n")
-			//v' = v_a with highest n_a or choose own v
+			px.Logf("Got majority prepare OK! \n")
 
 			//Find the value
 			highest_n := 0
@@ -296,6 +306,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 				}
 			}
 
+			//TODO is this correct?
 			if highest_n <= 0 { //No other values, use own
 				highest_val = val
 			}
@@ -304,23 +315,45 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 
 			acceptMajority, _ := px.attemptRPCMajority("Paxos.Accept", acceptArgs)
 
-			DebugPrintf("Got enough accept responses! \n")
+			px.Logf("Got enough accept responses! \n")
 			if acceptMajority {
-				DebugPrintf("Got majority accept OK! \n")
+				px.Logf("Got majority accept OK! \n")
 
 				//px.Decided(DecidedArgs{highest_val, Seq}, nil)
-				for _, peer := range px.peers {
-					go func() {
-						call(peer, "Paxos.Decided", DecidedArgs{highest_val, Seq}, nil)
-					}()
+				for i := range px.peers {
+					if i == px.me {
+						px.Decided(DecidedArgs{highest_val, Seq}, nil)
+					} else {
+						peer := px.peers[i]
+						go func() {
+							call(peer, "Paxos.Decided", DecidedArgs{highest_val, Seq}, nil)
+						}()
+					}
 				}
 			}
 		}
+		px.lock(Seq)
+		decided = px.decided[Seq]
+		px.unlock(Seq)
 	}
 }
 
+//Lock this function?
+func (px *Paxos) lock(Seq int) {
+	if px.locks[Seq] == nil {
+		px.locks[Seq] = &sync.Mutex{}
+	}
+	px.locks[Seq].Lock()
+}
+func (px *Paxos) unlock(Seq int) {
+	px.locks[Seq].Unlock()
+}
+
 func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
-	DebugPrintf("VALUE DECIDED %d! \n", args.Value)
+	px.Logf("SEQ: %d VALUE DECIDED %s! \n", args.Seq, args.Value)
+	px.lock(args.Seq)
+	defer px.unlock(args.Seq)
+
 	px.val[args.Seq] = args.Value
 	px.decided[args.Seq] = true
 
@@ -328,7 +361,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 }
 
 func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
-	DebugPrintf("Prepare(%s) \n", args)
+	//px.Logf("Prepare(%s) \n", args)
 	ac, OK := px.acceptor[args.Seq]
 	if !OK {
 		ac = &AcceptorInstance{}
@@ -357,19 +390,16 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 	n := args.N
 	v := args.V
 
-	DebugPrintf("Accept(%d, %s)! \n", n, v)
+	//px.Logf("Accept(%d, %s)! \n", n, v)
 
 	if n >= ac.n_prep {
-
-		DebugPrintf("Accept(%d, %s) OK! \n", n, v)
+		//px.Logf("Accept(%d, %s) OK! \n", n, v)
 		ac.n_prep = n
 		ac.n_accept = n
 		ac.val_accept = v
 		ret.OK = true
-		ret.N_a = args.N
-		ret.V_a = v
 	} else {
-		DebugPrintf("Accept(%d, %s) Declined! \n", n, v)
+		//px.Logf("Accept(%d, %s) Declined! \n", n, v)
 		ret.OK = false
 	}
 
@@ -422,6 +452,7 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.decided = make(map[int]bool)
 	px.n_highest = make(map[int]int)
 	px.acceptor = make(map[int]*AcceptorInstance)
+	px.locks = make(map[int]*sync.Mutex)
 	px.n_peers = len(peers)
 	px.majority = (px.n_peers / 2) + (1 - px.n_peers%2)
 
