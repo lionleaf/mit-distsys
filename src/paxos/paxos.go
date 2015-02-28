@@ -32,6 +32,14 @@ import (
 	"syscall"
 )
 
+const debug = false
+
+func DebugPrintf(str string, v ...interface{}) {
+	if debug {
+		fmt.Printf(str, v...)
+	}
+}
+
 // px.Status() return values, indicating
 // whether an agreement has been decided,
 // or Paxos has not yet reached agreement,
@@ -209,10 +217,10 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	if px.decided[seq] {
-		fmt.Printf("Status decided! \n")
+		DebugPrintf("Status decided! \n")
 		return Decided, px.val[seq]
 	}
-	fmt.Printf("Status pending! \n")
+	DebugPrintf("Status pending! \n")
 	return Pending, nil
 }
 
@@ -269,34 +277,38 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 func (px *Paxos) Propose(val interface{}, Seq int) {
 	for !px.decided[Seq] {
 		n := rndAbove(px.n_highest[Seq])
-		fmt.Printf("\nN: %d \n", n)
+		DebugPrintf("\nN: %d \n", n)
 
-		prepMajority, _ := px.attemptRPCMajority("Paxos.Prepare", PrepareArgs{n, Seq})
+		prepMajority, prepOKResponses := px.attemptRPCMajority("Paxos.Prepare", PrepareArgs{n, Seq})
 
 		if prepMajority {
-			fmt.Printf("Got majority prepare OK! \n")
+			DebugPrintf("Got majority prepare OK! \n")
 			//v' = v_a with highest n_a or choose own v
 
-			//TODO: Wrong n? Wrong val.
-			acceptArgs := AcceptArgs{N: n, V: val, Seq: Seq}
-			acceptMajority, acceptOKResponses := px.attemptRPCMajority("Paxos.Accept", acceptArgs)
+			//Find the value
+			highest_n := 0
+			var highest_val interface{}
 
-			fmt.Printf("Got enough accept responses! \n")
-			if acceptMajority {
-				fmt.Printf("Got majority accept OK! \n")
-
-				//Find the value
-				highest_n := 0
-				var highest_val interface{}
-
-				for _, response := range acceptOKResponses {
-					if response.N_a > highest_n {
-						highest_n = response.N_a
-						highest_val = response.V_a
-					}
+			for _, response := range prepOKResponses {
+				if response.N_a > highest_n {
+					highest_n = response.N_a
+					highest_val = response.V_a
 				}
+			}
 
-				px.Decided(DecidedArgs{highest_val, Seq}, nil)
+			if highest_n <= 0 { //No other values, use own
+				highest_val = val
+			}
+
+			acceptArgs := AcceptArgs{N: n, V: highest_val, Seq: Seq}
+
+			acceptMajority, _ := px.attemptRPCMajority("Paxos.Accept", acceptArgs)
+
+			DebugPrintf("Got enough accept responses! \n")
+			if acceptMajority {
+				DebugPrintf("Got majority accept OK! \n")
+
+				//px.Decided(DecidedArgs{highest_val, Seq}, nil)
 				for _, peer := range px.peers {
 					go func() {
 						call(peer, "Paxos.Decided", DecidedArgs{highest_val, Seq}, nil)
@@ -308,7 +320,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 }
 
 func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
-	fmt.Printf("VALUE DECIDED %d! \n", args.Value)
+	DebugPrintf("VALUE DECIDED %d! \n", args.Value)
 	px.val[args.Seq] = args.Value
 	px.decided[args.Seq] = true
 
@@ -316,7 +328,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 }
 
 func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
-	fmt.Printf("Prepare(%s) \n", args)
+	DebugPrintf("Prepare(%s) \n", args)
 	ac, OK := px.acceptor[args.Seq]
 	if !OK {
 		ac = &AcceptorInstance{}
@@ -345,11 +357,11 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 	n := args.N
 	v := args.V
 
-	fmt.Printf("Accept(%d, %s)! \n", n, v)
+	DebugPrintf("Accept(%d, %s)! \n", n, v)
 
 	if n >= ac.n_prep {
 
-		fmt.Printf("Accept(%d, %s) OK! \n", n, v)
+		DebugPrintf("Accept(%d, %s) OK! \n", n, v)
 		ac.n_prep = n
 		ac.n_accept = n
 		ac.val_accept = v
@@ -357,7 +369,7 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 		ret.N_a = args.N
 		ret.V_a = v
 	} else {
-		fmt.Printf("Accept(%d, %s) Declined! \n", n, v)
+		DebugPrintf("Accept(%d, %s) Declined! \n", n, v)
 		ret.OK = false
 	}
 
