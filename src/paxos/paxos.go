@@ -32,7 +32,7 @@ import (
 	"syscall"
 )
 
-const DEBUG = true
+const DEBUG = false
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
