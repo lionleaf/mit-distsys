@@ -32,7 +32,7 @@ import (
 	"syscall"
 )
 
-const DEBUG = true
+const DEBUG = false
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -311,7 +311,7 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 
 	//Channel to stop extra rpcs not needed
 	done := make(chan bool)
-	defer close(done)
+	channel_closed := false
 
 	// Start a goroutine with an rpc to every peer
 	for i := range px.peers {
@@ -344,9 +344,25 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 
 		if numberOk >= px.majority {
 			majority = true
-			return
+			if !channel_closed {
+				//Notify that there is no point retrying RPC any more
+				close(done)
+				channel_closed = true
+			}
 		} else if numberNotOk >= px.majority {
 			majority = false
+			if !channel_closed {
+				//Notify that there is no point retrying RPC any more
+				close(done)
+				channel_closed = true
+			}
+		}
+
+		//Only return when all rpc have returned.
+		//Remember that not reaching the peer counts as not ok
+		//So even in partitions this is fine,
+		//Without this we get some speed but risk "too many files open"
+		if numberOk+numberNotOk == px.n_peers {
 			return
 		}
 	}
@@ -394,8 +410,6 @@ func (px *Paxos) RPCAttempt(peer string, me bool, rpcname string, args interface
 	}
 
 }
-
-//Idea: Use select majority ok majority fail default
 
 func (px *Paxos) Propose(val interface{}, Seq int) {
 
