@@ -32,7 +32,7 @@ import (
 	"syscall"
 )
 
-const DEBUG = false
+const DEBUG = true
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -51,6 +51,7 @@ type AcceptorInstance struct {
 	n_prep      int
 	n_accept    int
 	val_accept  interface{}
+	lock        sync.Mutex
 }
 
 type Paxos struct {
@@ -73,9 +74,8 @@ type Paxos struct {
 	//Proposer data, organized in maps
 	n_highest map[int]int
 	acceptor  map[int]*AcceptorInstance
-	locks     map[int]*sync.Mutex
 
-	globalLock sync.Mutex
+	lock sync.Mutex
 
 	//Map of the values
 	val map[int]interface{}
@@ -191,6 +191,8 @@ func (px *Paxos) Start(seq int, v interface{}) {
 // see the comments for Min() for more explanation.
 //
 func (px *Paxos) Done(seq int) {
+	px.lock.Lock()
+	defer px.lock.Unlock()
 	px.min = seq
 	px.updateGlobalMin()
 }
@@ -201,6 +203,8 @@ func (px *Paxos) Done(seq int) {
 // this peer.
 //
 func (px *Paxos) Max() int {
+	px.lock.Lock()
+	defer px.lock.Unlock()
 	return px.maxSeq
 }
 
@@ -233,6 +237,8 @@ func (px *Paxos) Max() int {
 // instances.
 //
 func (px *Paxos) Min() int {
+	px.lock.Lock()
+	defer px.lock.Unlock()
 	return px.globalMin + 1
 }
 
@@ -244,8 +250,8 @@ func (px *Paxos) Min() int {
 // it should not contact other Paxos peers.
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
-	px.lock(seq)
-	defer px.unlock(seq)
+	px.lock.Lock()
+	defer px.lock.Unlock()
 	if seq <= px.globalMin {
 		return Forgotten, nil
 	}
@@ -262,7 +268,11 @@ func rndAbove(n int) int {
 }
 
 func (px *Paxos) minFromPeer(newMin int, peer int) {
+	px.lock.Lock()
+	defer px.lock.Unlock()
+
 	px.Logf("minFromPeer(%d,%d)\n", newMin, peer)
+
 	if newMin > px.mins[peer] {
 		px.Logf("New min from %d: %d \n", peer, newMin)
 		px.mins[peer] = newMin
@@ -292,145 +302,141 @@ func (px *Paxos) freeResources(prevMin int) {
 	}
 }
 
-func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority bool, ok_responses []PrepAcceptRet, highest_n int) {
+func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority bool, highest_n int, highest_v interface{}) {
 	px.Logf("RPCMajority(%s)\n", rpcname)
-	//Make it buffered so we don't have goroutines blocked forever.
-	//There will never be more than n_peers, so we are safe.
-	done := make(chan bool, px.n_peers)
-
-	high_n := 0
-
-	var rpcMutex sync.Mutex
-
-	n_responses := 0
-	n_ok := 0
 
 	// Keep all the OK responses
-	ok_resp := make([]PrepAcceptRet, 0, px.n_peers)
+	okResponses := make(chan PrepAcceptRet, px.n_peers)
+	notOkResponses := make(chan PrepAcceptRet, px.n_peers)
 
-	//Lock to sync the different RPC calls
+	//Channel to stop extra rpcs not needed
+	done := make(chan bool)
+	defer close(done)
 
 	// Start a goroutine with an rpc to every peer
 	for i := range px.peers {
 		peer := px.peers[i]
 		me := i == px.me
-		go func() {
-			ret := PrepAcceptRet{}
+		go px.RPCAttempt(peer, me, rpcname, args, okResponses, notOkResponses, done)
+	}
 
-			//RPC ok response
-			ok := false
+	numberNotOk := 0
+	numberOk := 0
 
-			if me && rpcname == "Paxos.Accept" {
-				ok = true
-				px.Accept(args.(AcceptArgs), &ret)
-			} else {
+	for true {
+		if px.isdead() {
+			return
+		}
 
-				//Retry RPC up to 3 times
-				for i := 0; i < 3 && !ok; i++ {
-					px.Logf("call(%s,%s)\n", peer, rpcname)
-					ok = call(peer, rpcname, args, &ret)
-					if !ok {
-						px.Logf("Retrying call(%s,%s)\n", peer, rpcname)
-					}
+		select {
+		case resp := <-okResponses:
+			numberOk++
+			if resp.N_a > highest_n {
+				highest_n = resp.N_a
+				highest_v = resp.V_a
+			}
+			px.minFromPeer(resp.Min, resp.Peer_n)
+
+		case resp := <-notOkResponses:
+			numberNotOk++
+			px.minFromPeer(resp.Min, resp.Peer_n)
+		}
+
+		if numberOk >= px.majority {
+			majority = true
+			return
+		} else if numberNotOk >= px.majority {
+			majority = false
+			return
+		}
+	}
+
+	return
+}
+
+func (px *Paxos) RPCAttempt(peer string, me bool, rpcname string, args interface{},
+	okResponses chan PrepAcceptRet, notOkResponses chan PrepAcceptRet, done chan bool) {
+
+	ret := PrepAcceptRet{}
+
+	//RPC ok response
+	ok := false
+
+	//No RPC if I'm calling myself
+	if me && rpcname == "Paxos.Accept" {
+		ok = true
+		px.Accept(args.(AcceptArgs), &ret)
+	} else { //We have to RPC
+
+		//Retry RPC up to 3 times
+		for i := 0; i < 3 && !ok; i++ {
+			px.Logf("call(%s,%s)\n", peer, rpcname)
+
+			select {
+			case <-done:
+				//No need to keep trying, already enough answers
+				notOkResponses <- ret
+				px.Logf("Stopping RPC retry!\n")
+				return
+			default:
+				ok = call(peer, rpcname, args, &ret)
+				if !ok {
+					px.Logf("Retrying call(%s,%s)\n", peer, rpcname)
 				}
 			}
-
-			rpcMutex.Lock()
-
-			px.Logf("ret.N_a : %d\n ", ret.N_a)
-			if ret.N_a > high_n {
-				high_n = ret.N_a
-				px.Logf("High_n : %d\n ", high_n)
-			}
-
-			px.minFromPeer(ret.Min, ret.Peer_n)
-
-			n_responses++
-			if ok && ret.OK {
-				n_ok++
-				ok_resp = append(ok_resp, ret)
-				px.Logf("Ok response recorded\n")
-			}
-
-			//If we have a majority ok or declines we don't need to wait for more responses
-			if n_ok >= px.majority || (n_responses-n_ok) >= px.majority || px.isdead() {
-				px.Logf("We are returning!!\n")
-				done <- true
-			}
-			if n_responses == px.n_peers {
-				close(done)
-			}
-
-			rpcMutex.Unlock()
-		}()
+		}
 	}
 
-	//Wait for enough responses
-	<-done
-	px.Logf("The wait is over!!\n")
-
-	rpcMutex.Lock()
-	cond := n_ok >= px.majority
-	rpcMutex.Unlock()
-
-	if cond {
-		return true, ok_resp, high_n
+	if ok && ret.OK {
+		okResponses <- ret
+	} else {
+		notOkResponses <- ret
 	}
-	return false, nil, high_n
+
 }
+
+//Idea: Use select majority ok majority fail default
 
 func (px *Paxos) Propose(val interface{}, Seq int) {
 
 	px.Logf("Propose(%d)\n", Seq)
+
 	//Data race condition
-	px.globalLock.Lock()
+	px.lock.Lock()
 	if Seq > px.maxSeq {
 		px.maxSeq = Seq
 	}
-	px.globalLock.Unlock()
+	px.lock.Unlock()
 
 	decided := false
 	for !decided && !px.isdead() {
+
+		px.lock.Lock()
 		n := rndAbove(px.n_highest[Seq])
 
-		prepMajority, prepOKResponses, high_n := px.attemptRPCMajority("Paxos.Prepare", PrepareArgs{n, Seq, px.min, px.me})
-		px.Logf("%d: Prepare has returned: high_n: %d! \n", Seq, high_n)
+		prepArgs := PrepareArgs{n, Seq, px.min, px.me}
+		px.lock.Unlock()
+
+		prepMajority, highest_n, highest_v := px.attemptRPCMajority("Paxos.Prepare", prepArgs)
+
+		if highest_n <= 0 { //No other values, use own
+			px.Logf("%d: Choosing our own value! \n", Seq)
+			highest_v = val
+			highest_n = n
+		}
 
 		//Make sure we update the highest seen n even in case of declines
-		if !prepMajority {
-			px.lock(Seq)
-			if high_n > px.n_highest[Seq] {
-				px.n_highest[Seq] = high_n
-				px.Logf("New high_n %d\n", high_n)
-			}
-			px.unlock(Seq)
+		px.lock.Lock()
+		if highest_n > px.n_highest[Seq] {
+			px.n_highest[Seq] = highest_n
+			px.Logf("New high_n %d\n", highest_n)
 		}
+		px.lock.Unlock()
 
 		if prepMajority {
 			px.Logf("%d: Got majority prepare! \n", Seq)
 
-			//Find the value
-			highest_n := 0
-			var highest_val interface{}
-
-			for _, response := range prepOKResponses {
-				if response.N_a > highest_n {
-					highest_n = response.N_a
-					highest_val = response.V_a
-				}
-			}
-
-			if highest_n <= 0 { //No other values, use own
-				px.Logf("%d: Choosing our own value! \n", Seq)
-				highest_val = val
-				highest_n = n
-			}
-
-			px.lock(Seq)
-			px.n_highest[Seq] = highest_n
-			px.unlock(Seq)
-
-			acceptArgs := AcceptArgs{N: n, V: highest_val, Seq: Seq}
+			acceptArgs := AcceptArgs{N: n, V: highest_v, Seq: Seq}
 
 			acceptMajority, _, _ := px.attemptRPCMajority("Paxos.Accept", acceptArgs)
 			px.Logf("%d: Accept has returned! \n", Seq)
@@ -438,67 +444,58 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 			if acceptMajority {
 				px.Logf("%d Got majority accept! \n", Seq)
 
-				//px.Decided(DecidedArgs{highest_val, Seq}, nil)
-				for i := range px.peers {
-					ret := DecidedRet{}
-					if i == px.me {
-						px.Logf("%d Calling own Decided! \n", Seq)
-						px.Decided(DecidedArgs{highest_val, Seq, px.min, px.me}, &ret)
-					} else {
-						peer := px.peers[i]
+				px.lock.Lock()
+				decidedArgs := DecidedArgs{
+					Value:  highest_v,
+					Seq:    Seq,
+					Min:    px.min,
+					Peer_n: px.me}
+				px.lock.Unlock()
 
-						var minMutex sync.Mutex
-						go func() {
-							px.Logf("%d RPC Decided! \n", Seq)
-							ok := call(peer, "Paxos.Decided", DecidedArgs{highest_val, Seq, px.min, px.me}, &ret)
-
-							minMutex.Lock()
-							if ok {
-								px.minFromPeer(ret.Min, ret.Peer_n)
-							}
-							minMutex.Unlock()
-						}()
-					}
-				}
+				px.sendDecidedToAll(decidedArgs)
 			}
 		}
 
-		px.lock(Seq)
+		px.lock.Lock()
 		decided = px.decided[Seq]
-		px.unlock(Seq)
+		px.lock.Unlock()
 	}
 }
 
-var lockLock sync.Mutex
-
-func (px *Paxos) lock(Seq int) {
-
-	//Make sure only one lock is created
-	lockLock.Lock()
-	if px.locks[Seq] == nil {
-		px.locks[Seq] = &sync.Mutex{}
+// Concurrently send a decided message to every peer. Including self.
+func (px *Paxos) sendDecidedToAll(args DecidedArgs) {
+	for i, peer := range px.peers {
+		ret := DecidedRet{}
+		if i == px.me {
+			px.Decided(args, &ret)
+		} else {
+			go px.sendDecided(args, ret, peer)
+		}
 	}
-	lockLock.Unlock()
 
-	px.locks[Seq].Lock()
 }
 
-func (px *Paxos) unlock(Seq int) {
-	px.locks[Seq].Unlock()
+//Send a decided message to a specific peer and handle return of min value
+//Run in multiple goroutines concurrently
+func (px *Paxos) sendDecided(args DecidedArgs, ret DecidedRet, peer string) {
+	ok := call(peer, "Paxos.Decided", args, &ret)
+
+	if ok {
+		px.minFromPeer(ret.Min, ret.Peer_n)
+	}
+
 }
 
 func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	px.Logf("Decided(%d)\n", args.Seq)
-	px.lock(args.Seq)
-	defer px.unlock(args.Seq)
 
+	px.lock.Lock()
 	if args.Seq > px.maxSeq {
 		px.maxSeq = args.Seq
 	}
 
 	if !px.decided[args.Seq] {
 		px.Logf("%d: VALUE DECIDED! \n", args.Seq)
-
 		px.val[args.Seq] = args.Value
 		px.decided[args.Seq] = true
 	}
@@ -506,33 +503,34 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	ret.OK = true
 	ret.Min = px.min
 	ret.Peer_n = px.me
+
+	px.lock.Unlock()
 	return nil
 }
 
 func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 	px.Logf("Prepare(%d)\n", args.Seq)
-	px.lock(args.Seq)
-	defer px.unlock(args.Seq)
-
-	//For memory management
-	ret.Min = px.min
-	ret.Peer_n = px.me
 
 	px.minFromPeer(args.Min, args.Peer_n)
 
-	px.globalLock.Lock()
+	//For memory management
+	px.lock.Lock()
+	ret.Min = px.min
+	ret.Peer_n = px.me
+
 	if args.Seq > px.maxSeq {
 		px.maxSeq = args.Seq
 	}
-	px.globalLock.Unlock()
 
-	px.globalLock.Lock()
 	ac, OK := px.acceptor[args.Seq]
 	if !OK {
 		ac = &AcceptorInstance{}
 		px.acceptor[args.Seq] = ac
 	}
-	px.globalLock.Unlock()
+	px.lock.Unlock()
+
+	ac.lock.Lock()
+	defer ac.lock.Unlock()
 
 	if args.N > ac.n_prep {
 		ac.n_prep = args.N
@@ -552,16 +550,14 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 
 func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 	px.Logf("Accept(%d)\n", args.Seq)
-	px.lock(args.Seq)
-	defer px.unlock(args.Seq)
 
 	px.minFromPeer(args.Min, args.Peer_n)
 
-	px.globalLock.Lock()
+	px.lock.Lock()
+
 	if args.Seq > px.maxSeq {
 		px.maxSeq = args.Seq
 	}
-	px.globalLock.Unlock()
 
 	ac, OK := px.acceptor[args.Seq]
 	if !OK {
@@ -569,8 +565,13 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 		px.acceptor[args.Seq] = ac
 	}
 
+	px.lock.Unlock()
+
 	n := args.N
 	v := args.V
+
+	ac.lock.Lock()
+	defer ac.lock.Unlock()
 
 	if n >= ac.n_prep {
 		px.Logf("%d accept_ok(N: %d  N_prep: %d)! \n", args.Seq, n, ac.n_prep)
@@ -632,7 +633,6 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.decided = make(map[int]bool)
 	px.n_highest = make(map[int]int)
 	px.acceptor = make(map[int]*AcceptorInstance)
-	px.locks = make(map[int]*sync.Mutex)
 	px.n_peers = len(peers)
 	px.majority = (px.n_peers / 2) + px.n_peers%2
 	px.mins = make([]int, px.n_peers)
