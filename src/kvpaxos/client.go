@@ -66,19 +66,28 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	return ""
+
+	Printf("Get!")
+	reply := GetReply{}
+	call(ck.servers[0], "KVPaxos.Get", GetArgs{key}, &reply)
+	return reply.Value
 }
 
 //
 // shared by Put and Append.
 //
-func (ck *Clerk) PutAppend(key string, value string, op string) {
+func (ck *Clerk) PutAppend(key string, value string, op OpType) {
+	reply := PutAppendReply{}
+	Printf("PutAppend!")
+	call(ck.servers[0], "KVPaxos.PutAppend", PutAppendArgs{key, value, op}, &reply)
 	// You will have to modify this function.
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	Printf("Put!")
+	ck.PutAppend(key, value, Put)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	Printf("Append!")
+	ck.PutAppend(key, value, Append)
 }
