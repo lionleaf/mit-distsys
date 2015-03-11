@@ -14,6 +14,10 @@ import "os"
 import "syscall"
 import "encoding/gob"
 import "math/rand"
+import (
+	"net/http"
+	_ "net/http/pprof"
+)
 
 const Debug = 1
 
@@ -49,9 +53,6 @@ type Op struct {
 	Opnr   int
 	Server int //The server that issued this operation
 
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 //One goroutine will continually try to apply operations
@@ -92,12 +93,23 @@ func (kv *KVPaxos) applyLoop() {
 	for !kv.isdead() {
 		seq = kv.nextCommitSeq
 
-		fate, val := kv.px.Status(seq)
-		if fate != paxos.Decided {
-			//TODO: Exponential stepback?
-			//On demand ping?
-			time.Sleep(20 * time.Millisecond)
-			continue
+		var val interface{}
+		var status paxos.Fate
+		to := 10 * time.Millisecond
+		for {
+			status, val = kv.px.Status(seq)
+			if status == paxos.Decided {
+				break
+			}
+			kv.Logf("Still waiting for paxos: %d", seq)
+			time.Sleep(to)
+			if to > 500*time.Millisecond && seq < kv.px.Max() {
+				kv.Logf("Starting a dummy operation")
+				//kv.px.Start(seq, Op{Type: Get, Key: "", Value: "", Opnr: -1, Server: -1})
+			}
+			if to < 10*time.Second {
+				to *= 2
+			}
 		}
 
 		kv.Logf("Applying operation to database!")
@@ -119,6 +131,12 @@ func (kv *KVPaxos) applyLoop() {
 			}
 		}
 
+		//NOTE TO SELF
+
+		//Jeg vet hva som skjer (kanskje).
+		//TODO: La oss si at seq 7 8 og 9 er bestemt, vi har bare hoert om 9. Og saa get 10. 7 og 8 vil alltid vaere undecided. Vi maa restarte Start() for 7 og 8. Men hvor?
+
+		kv.px.Done(seq)
 		kv.nextCommitSeq++
 	}
 }
@@ -155,46 +173,65 @@ func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	return nil
 }
 
+func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}) {
+
+	var status paxos.Fate
+	to := 10 * time.Millisecond
+	for {
+		status, val = kv.px.Status(seq)
+		if status == paxos.Decided {
+			return
+		}
+		kv.Logf("Still waiting for paxos: %d", seq)
+		time.Sleep(to)
+		if to < 10*time.Second {
+			to *= 2
+		}
+	}
+
+}
+
 func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string) (seq int) {
 	nr := kv.nextOpNr()
 	logEntry := Op{Type: op, Key: key, Value: val, Opnr: nr, Server: kv.me}
 
+	kv.Logf("Adding log entry %d(%s)", op, key)
 	for !kv.isdead() {
-
-		seq := kv.px.Max() + 1
+		kv.lock.Lock()
+		kv.seq++
+		seq := kv.seq
+		//TODO: Add duplicate check?
+		kv.lock.Unlock()
 
 		if op == Get {
+			kv.Logf("Waiting for lock 1")
 			kv.lock.Lock()
+			kv.Logf("Got lock 1")
 			if _, ok := kv.getRequestChannels[seq]; ok {
 				//Somebody else is already trying a get with this seq, better give up.
 				kv.lock.Unlock()
 				continue
 			}
-			channel := make(chan string)
+			channel := make(chan string, 1)
 			kv.Logf("Adding get channel at %d", seq)
 			kv.getRequestChannels[seq] = channel
 			kv.lock.Unlock()
 		}
 
 		kv.px.Start(seq, logEntry)
-		kv.Logf("Starting %d", seq)
 
-		time.Sleep(100 * time.Millisecond)
+		val := kv.waitForPaxos(seq)
 
-		var fate paxos.Fate
-		var val interface{}
-		for fate, val = kv.px.Status(seq); fate != paxos.Decided; {
-			time.Sleep(time.Millisecond)
-		}
-
-		kv.Logf("Decided!")
+		kv.Logf("AddLogEntry successful!")
 		if val == logEntry {
-			kv.Logf("Won!")
+			kv.Logf("Completed adding log entry %d(%s)", op, key)
 			return seq
 		} else {
 			kv.Logf("Other operation first!")
 			if op == Get {
+				kv.Logf("Waiting for lock 2")
 				kv.lock.Lock()
+				kv.Logf("Got lock 2")
 				kv.Logf("Removing channel!")
 				delete(kv.getRequestChannels, seq)
 				kv.lock.Unlock()
@@ -262,6 +299,9 @@ func StartServer(servers []string, me int) *KVPaxos {
 
 	go kv.applyLoop()
 
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 	// please do not change any of the following code,
 	// or do anything to subvert it.
 

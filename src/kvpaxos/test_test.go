@@ -99,7 +99,9 @@ func TestBasic(t *testing.T) {
 		}
 		for nth := 0; nth < npara; nth++ {
 			<-ca[nth]
+			fmt.Printf("Client %d returned\n", nth)
 		}
+		fmt.Printf("All servers returned, checking values\n")
 		var va [nservers]string
 		for i := 0; i < nservers; i++ {
 			va[i] = cka[i].Get("b")

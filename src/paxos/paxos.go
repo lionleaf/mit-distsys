@@ -286,7 +286,8 @@ func (px *Paxos) minFromPeer(newMin int, peer int) {
 
 func (px *Paxos) updateGlobalMin() {
 	oldGlobalMin := px.globalMin
-	currentGlobalMin := MaxInt
+	maxInt := int(^uint(0) >> 1)
+	currentGlobalMin := maxInt
 	for _, min := range px.mins {
 		if min < currentGlobalMin {
 			currentGlobalMin = min

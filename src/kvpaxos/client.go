@@ -67,9 +67,11 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 
-	Printf("Get!")
+	rng := int(nrand() % 1000)
+	Printf("Get %d!", rng)
 	reply := GetReply{}
 	call(ck.servers[0], "KVPaxos.Get", GetArgs{key}, &reply)
+	Printf("Get return %d!", rng)
 	return reply.Value
 }
 
@@ -78,8 +80,10 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	reply := PutAppendReply{}
-	Printf("PutAppend!")
+	rng := int(nrand() % 1000)
+	Printf("PutAppend %d!", rng)
 	call(ck.servers[0], "KVPaxos.PutAppend", PutAppendArgs{key, value, op}, &reply)
+	Printf("Append return %d!", rng)
 	// You will have to modify this function.
 }
 
