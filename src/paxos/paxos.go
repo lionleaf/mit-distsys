@@ -32,7 +32,7 @@ import (
 	"syscall"
 )
 
-const DEBUG = false
+const DEBUG = true
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -178,7 +178,7 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 // is reached.
 //
 func (px *Paxos) Start(seq int, v interface{}) {
-	// Your code here.
+	px.Logf("Paxos start!")
 	go func() {
 		px.Propose(v, seq)
 	}()
@@ -253,11 +253,14 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	px.lock.Lock()
 	defer px.lock.Unlock()
 	if seq <= px.globalMin {
+		px.Logf("Returning Forgotten from Status(%d)", seq)
 		return Forgotten, nil
 	}
 	if px.decided[seq] {
+		px.Logf("Returning Decided from Status(%d)", seq)
 		return Decided, px.val[seq]
 	}
+	px.Logf("Returning Pending from Status(%d)", seq)
 	return Pending, nil
 }
 
@@ -283,16 +286,19 @@ func (px *Paxos) minFromPeer(newMin int, peer int) {
 
 func (px *Paxos) updateGlobalMin() {
 	oldGlobalMin := px.globalMin
+	currentGlobalMin := MaxInt
 	for _, min := range px.mins {
-		if min > px.globalMin {
-			px.globalMin = min
+		if min < currentGlobalMin {
+			currentGlobalMin = min
 		}
 	}
 
-	if oldGlobalMin < px.globalMin {
-		px.Logf("New global min!\n")
+	if currentGlobalMin > px.globalMin {
+		px.Logf("New global min: %d!\n", px.globalMin)
+		px.globalMin = currentGlobalMin
 		px.freeResources(oldGlobalMin)
 	}
+
 }
 
 func (px *Paxos) freeResources(prevMin int) {
