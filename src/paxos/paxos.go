@@ -295,9 +295,9 @@ func (px *Paxos) updateGlobalMin() {
 	}
 
 	if currentGlobalMin > px.globalMin {
-		px.Logf("New global min: %d!\n", px.globalMin)
 		px.globalMin = currentGlobalMin
 		px.freeResources(oldGlobalMin)
+		px.Logf("New global min: %d!\n", px.globalMin)
 	}
 
 }

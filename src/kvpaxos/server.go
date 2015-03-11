@@ -136,7 +136,7 @@ func (kv *KVPaxos) applyLoop() {
 		//Jeg vet hva som skjer (kanskje).
 		//TODO: La oss si at seq 7 8 og 9 er bestemt, vi har bare hoert om 9. Og saa get 10. 7 og 8 vil alltid vaere undecided. Vi maa restarte Start() for 7 og 8. Men hvor?
 
-		kv.px.Done(seq)
+		//TODO: kv.px.Done(seq)
 		kv.nextCommitSeq++
 	}
 }
