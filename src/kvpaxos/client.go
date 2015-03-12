@@ -1,6 +1,9 @@
 package kvpaxos
 
-import "net/rpc"
+import (
+	"net/rpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
 
@@ -8,7 +11,9 @@ import "fmt"
 
 type Clerk struct {
 	servers []string
-	// You will have to modify this struct.
+	me      int
+	nextSeq int
+	mutex   sync.Mutex
 }
 
 func nrand() int64 {
@@ -18,10 +23,21 @@ func nrand() int64 {
 	return x
 }
 
+var nextClerkNumber int
+var clerkNrLock sync.Mutex
+
 func MakeClerk(servers []string) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.nextSeq = 1
+
+	clerkNrLock.Lock()
+	ck.me = nextClerkNumber
+	nextClerkNumber++
+	clerkNrLock.Unlock()
+
+	Printf("New clerk with number: %d", ck.me)
+
 	return ck
 }
 
@@ -59,6 +75,16 @@ func call(srv string, rpcname string,
 	return false
 }
 
+func (ck *Clerk) nextSeqNr() int {
+
+	ck.lock()
+	seq := ck.nextSeq
+	ck.nextSeq++
+	ck.unlock()
+
+	return seq
+}
+
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -70,9 +96,22 @@ func (ck *Clerk) Get(key string) string {
 	rng := int(nrand() % 1000)
 	Printf("Get %d!", rng)
 	reply := GetReply{}
-	call(ck.servers[0], "KVPaxos.Get", GetArgs{key}, &reply)
+
+	seq := ck.nextSeqNr()
+
+	args := GetArgs{Key: key, Client: ck.me, ClientSeq: seq}
+
+	call(ck.servers[0], "KVPaxos.Get", args, &reply)
 	Printf("Get return %d!", rng)
 	return reply.Value
+}
+
+func (ck *Clerk) lock() {
+	ck.mutex.Lock()
+}
+
+func (ck *Clerk) unlock() {
+	ck.mutex.Unlock()
 }
 
 //
@@ -82,7 +121,11 @@ func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	reply := PutAppendReply{}
 	rng := int(nrand() % 1000)
 	Printf("PutAppend %d!", rng)
-	call(ck.servers[0], "KVPaxos.PutAppend", PutAppendArgs{key, value, op}, &reply)
+
+	seq := ck.nextSeqNr()
+
+	args := PutAppendArgs{Key: key, Value: value, Op: op, Client: ck.me, ClientSeq: seq}
+	call(ck.servers[0], "KVPaxos.PutAppend", args, &reply)
 	Printf("Append return %d!", rng)
 	// You will have to modify this function.
 }

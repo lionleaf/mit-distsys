@@ -47,12 +47,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	Type   OpType
-	Key    string
-	Value  string
-	Opnr   int
-	Server int //The server that issued this operation
-
+	Type      OpType
+	Key       string
+	Value     string
+	Opnr      int
+	Server    int //The server that issued this operation
+	Client    int
+	ClientSeq int
 }
 
 //One goroutine will continually try to apply operations
@@ -84,7 +85,8 @@ type KVPaxos struct {
 	opnr          int //Unique number per op per server.
 	lock          sync.Mutex
 
-	database map[string]string
+	database   map[string]string
+	clientSeqs map[int]int
 }
 
 func (kv *KVPaxos) applyLoop() {
@@ -97,6 +99,9 @@ func (kv *KVPaxos) applyLoop() {
 		var status paxos.Fate
 		to := 10 * time.Millisecond
 		for {
+			if kv.isdead() {
+				return
+			}
 			status, val = kv.px.Status(seq)
 			if status == paxos.Decided {
 				break
@@ -112,29 +117,34 @@ func (kv *KVPaxos) applyLoop() {
 			}
 		}
 
-		kv.Logf("Applying operation to database!")
 		op := val.(Op)
 
-		switch op.Type {
-		case Put:
-			kv.database[op.Key] = op.Value
-		case Append:
-			kv.database[op.Key] = kv.database[op.Key] + op.Value
-		case Get:
-			kv.Logf("Get request! server: %d, me: %d ", op.Server, kv.me)
-			if op.Server == kv.me {
-				kv.lock.Lock()
-				channel := kv.getRequestChannels[seq]
-				kv.lock.Unlock()
-				kv.Logf("Sending get value through channel: %d", seq)
-				channel <- kv.database[op.Key]
+		clientSeq := op.ClientSeq
+		lastClientSeq := kv.clientSeqs[op.Client]
+
+		if clientSeq > lastClientSeq {
+			kv.Logf("Applying operation to database!")
+
+			kv.clientSeqs[op.Client] = clientSeq
+
+			switch op.Type {
+			case Put:
+				kv.database[op.Key] = op.Value
+			case Append:
+				kv.database[op.Key] = kv.database[op.Key] + op.Value
+			case Get:
+				kv.Logf("Get request! server: %d, me: %d ", op.Server, kv.me)
+				if op.Server == kv.me {
+					kv.lock.Lock()
+					channel := kv.getRequestChannels[seq]
+					kv.lock.Unlock()
+					kv.Logf("Sending get value through channel: %d", seq)
+					channel <- kv.database[op.Key]
+				}
 			}
+		} else {
+			kv.Logf("Duplicate detected! Not applied! Seq: %d", seq)
 		}
-
-		//NOTE TO SELF
-
-		//Jeg vet hva som skjer (kanskje).
-		//TODO: La oss si at seq 7 8 og 9 er bestemt, vi har bare hoert om 9. Og saa get 10. 7 og 8 vil alltid vaere undecided. Vi maa restarte Start() for 7 og 8. Men hvor?
 
 		//TODO: kv.px.Done(seq)
 		kv.nextCommitSeq++
@@ -150,7 +160,7 @@ func (kv *KVPaxos) nextOpNr() int {
 
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 
-	seq := kv.AddLogEntry(Get, args.Key, "")
+	seq := kv.AddLogEntry(Get, args.Key, "", args.Client, args.ClientSeq)
 
 	kv.lock.Lock()
 	returnChan := kv.getRequestChannels[seq]
@@ -169,7 +179,7 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 
 func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	kv.Logf("Server PutAppend!")
-	kv.AddLogEntry(args.Op, args.Key, args.Value)
+	kv.AddLogEntry(args.Op, args.Key, args.Value, args.Client, args.ClientSeq)
 	return nil
 }
 
@@ -179,7 +189,7 @@ func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}) {
 	to := 10 * time.Millisecond
 	for {
 		status, val = kv.px.Status(seq)
-		if status == paxos.Decided {
+		if status == paxos.Decided || kv.isdead() {
 			return
 		}
 		kv.Logf("Still waiting for paxos: %d", seq)
@@ -191,9 +201,21 @@ func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}) {
 
 }
 
-func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string) (seq int) {
+//TODO: Remove these notes
+//Two approaches: Make sure we never put duplicates in paxos log:
+//To do so I have to not propose something with Seq = n before commitpoint == n-1
+//and there has been no duplicates. Might be slow? Why? Because I cannot start mutliple
+//paxos instances at once. Is this problem? dunno.
+
+//Allow duplicates in paxos log, but filter them out on application. This way I can just
+//call paxos as I do right now, and check on application. How do I check on application?
+//A map? No. I can keep th... hmm.. ClientSeq is always in order!!! :D So, if I get to clientseq n,
+//there is not going to be duplicate of n-1. So I keep track of biggest clientseq per client.
+//If I get the same or lower I reject!!! Is this garuantied to work>?!
+
+func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, clientSeq int) (seq int) {
 	nr := kv.nextOpNr()
-	logEntry := Op{Type: op, Key: key, Value: val, Opnr: nr, Server: kv.me}
+	logEntry := Op{Type: op, Key: key, Value: val, Opnr: nr, Server: kv.me, Client: client, ClientSeq: clientSeq}
 
 	kv.Logf("Adding log entry %d(%s)", op, key)
 	for !kv.isdead() {
@@ -282,7 +304,7 @@ func StartServer(servers []string, me int) *KVPaxos {
 	kv := new(KVPaxos)
 	kv.me = me
 	kv.database = make(map[string]string)
-
+	kv.clientSeqs = make(map[int]int)
 	kv.getRequestChannels = make(map[int]chan string)
 
 	rpcs := rpc.NewServer()
