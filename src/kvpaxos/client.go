@@ -93,16 +93,18 @@ func (ck *Clerk) nextSeqNr() int {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 
-	rng := int(nrand() % 1000)
-	Printf("Get %d!", rng)
-	reply := GetReply{}
-
 	seq := ck.nextSeqNr()
 
 	args := GetArgs{Key: key, Client: ck.me, ClientSeq: seq}
+	reply := GetReply{}
 
-	call(ck.servers[0], "KVPaxos.Get", args, &reply)
-	Printf("Get return %d!", rng)
+	ok := false
+	for !ok {
+		server := int(nrand()) % len(ck.servers)
+		Printf("Calling Get on server: %d clientSeq:%d", server, seq)
+		ok = call(ck.servers[server], "KVPaxos.Get", args, &reply)
+	}
+	Printf("Get return %d!", seq)
 	return reply.Value
 }
 
@@ -118,15 +120,19 @@ func (ck *Clerk) unlock() {
 // shared by Put and Append.
 //
 func (ck *Clerk) PutAppend(key string, value string, op OpType) {
-	reply := PutAppendReply{}
-	rng := int(nrand() % 1000)
-	Printf("PutAppend %d!", rng)
 
 	seq := ck.nextSeqNr()
 
 	args := PutAppendArgs{Key: key, Value: value, Op: op, Client: ck.me, ClientSeq: seq}
-	call(ck.servers[0], "KVPaxos.PutAppend", args, &reply)
-	Printf("Append return %d!", rng)
+	reply := PutAppendReply{}
+
+	ok := false
+	for !ok {
+		server := int(nrand()) % len(ck.servers)
+		Printf("Calling PutAppend on server: %d clientSeq:%d !", server, seq)
+		call(ck.servers[server], "KVPaxos.PutAppend", args, &reply)
+	}
+	Printf("Append return %d!", seq)
 	// You will have to modify this function.
 }
 

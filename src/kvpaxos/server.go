@@ -92,6 +92,7 @@ type KVPaxos struct {
 func (kv *KVPaxos) applyLoop() {
 	var seq int
 	kv.nextCommitSeq = 1 //Because I use paxos.Max() + 1, first seq is 1
+	lastDummy := 0
 	for !kv.isdead() {
 		seq = kv.nextCommitSeq
 
@@ -106,11 +107,17 @@ func (kv *KVPaxos) applyLoop() {
 			if status == paxos.Decided {
 				break
 			}
-			kv.Logf("Still waiting for paxos: %d", seq)
+			if status == paxos.Pending {
+				kv.Logf("Still waiting for paxos: %d status Pending", seq)
+			} else {
+
+				kv.Logf("ERROR: Still waiting for paxos: %d status Forgotten!!! (or something weird)", seq)
+			}
 			time.Sleep(to)
-			if to > 500*time.Millisecond && seq < kv.px.Max() {
-				kv.Logf("Starting a dummy operation")
-				//kv.px.Start(seq, Op{Type: Get, Key: "", Value: "", Opnr: -1, Server: -1})
+			if to > 100*time.Millisecond && seq < kv.px.Max() && lastDummy < seq {
+				kv.Logf("Starting a dummy operation for: %d getting status %d", seq, status)
+				kv.px.Start(seq, Op{Type: Get, Key: "", Value: "", Opnr: -1, Server: -1})
+				lastDummy = seq //Avoid multiple dummies at same seq
 			}
 			if to < 10*time.Second {
 				to *= 2
