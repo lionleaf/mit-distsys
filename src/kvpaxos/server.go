@@ -87,6 +87,8 @@ type KVPaxos struct {
 
 	database   map[string]string
 	clientSeqs map[int]int
+	//	dis! :)
+	getResults map[string]string
 }
 
 func (kv *KVPaxos) applyLoop() {
@@ -110,14 +112,14 @@ func (kv *KVPaxos) applyLoop() {
 			if status == paxos.Pending {
 				kv.Logf("Still waiting for paxos: %d status Pending", seq)
 			} else {
-
 				kv.Logf("ERROR: Still waiting for paxos: %d status Forgotten!!! (or something weird)", seq)
 			}
 			time.Sleep(to)
-			if to > 100*time.Millisecond && seq < kv.px.Max() && lastDummy < seq {
+			if to > 500*time.Millisecond && seq < kv.px.Max() && lastDummy < seq {
 				kv.Logf("Starting a dummy operation for: %d getting status %d", seq, status)
 				kv.px.Start(seq, Op{Type: Get, Key: "", Value: "", Opnr: -1, Server: -1})
 				lastDummy = seq //Avoid multiple dummies at same seq
+				to = 10 * time.Millisecond
 			}
 			if to < 10*time.Second {
 				to *= 2
@@ -129,28 +131,33 @@ func (kv *KVPaxos) applyLoop() {
 		clientSeq := op.ClientSeq
 		lastClientSeq := kv.clientSeqs[op.Client]
 
-		if clientSeq > lastClientSeq {
-			kv.Logf("Applying operation to database!")
+		kv.Logf("Applying operation to database!")
 
-			kv.clientSeqs[op.Client] = clientSeq
+		kv.clientSeqs[op.Client] = clientSeq
 
-			switch op.Type {
-			case Put:
+		switch op.Type {
+		case Put:
+			if clientSeq > lastClientSeq {
 				kv.database[op.Key] = op.Value
-			case Append:
-				kv.database[op.Key] = kv.database[op.Key] + op.Value
-			case Get:
-				kv.Logf("Get request! server: %d, me: %d ", op.Server, kv.me)
-				if op.Server == kv.me {
-					kv.lock.Lock()
-					channel := kv.getRequestChannels[seq]
-					kv.lock.Unlock()
-					kv.Logf("Sending get value through channel: %d", seq)
-					channel <- kv.database[op.Key]
-				}
+			} else {
+				kv.Logf("Duplicate Put detected! Not applied! Seq:(%d, %d)", op.Client, seq)
 			}
-		} else {
-			kv.Logf("Duplicate detected! Not applied! Seq: %d", seq)
+
+		case Append:
+			if clientSeq > lastClientSeq {
+				kv.database[op.Key] = kv.database[op.Key] + op.Value
+			} else {
+				kv.Logf("Duplicate Append detected! Not applied! Seq:(%d, %d)", op.Client, seq)
+			}
+		case Get:
+			kv.Logf("Get request! server: %d, me: %d ", op.Server, kv.me)
+			if op.Server == kv.me {
+				kv.lock.Lock()
+				channel := kv.getRequestChannels[seq]
+				kv.lock.Unlock()
+				kv.Logf("Sending get value through channel: %d", seq)
+				channel <- kv.database[op.Key]
+			}
 		}
 
 		//TODO: kv.px.Done(seq)

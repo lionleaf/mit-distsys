@@ -101,10 +101,11 @@ func (ck *Clerk) Get(key string) string {
 	ok := false
 	for !ok {
 		server := int(nrand()) % len(ck.servers)
-		Printf("Calling Get on server: %d clientSeq:%d", server, seq)
+		Printf("Calling Get on server: %d (clientID, clientSeq): (%d,%d)", server, ck.me, seq)
 		ok = call(ck.servers[server], "KVPaxos.Get", args, &reply)
+		Printf("Get returned from server: %d clientSeq: (%d, %d)  OK: %t", server, ck.me, seq, ok)
 	}
-	Printf("Get return %d!", seq)
+	Printf("Get return (client, seq) (%d, %d)!", ck.me, seq)
 	return reply.Value
 }
 
@@ -129,8 +130,8 @@ func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	ok := false
 	for !ok {
 		server := int(nrand()) % len(ck.servers)
-		Printf("Calling PutAppend on server: %d clientSeq:%d !", server, seq)
-		call(ck.servers[server], "KVPaxos.PutAppend", args, &reply)
+		Printf("Calling PutAppend on server: %d (clientID, clientSeq): (%d,%d)", server, ck.me, seq)
+		ok = call(ck.servers[server], "KVPaxos.PutAppend", args, &reply)
 	}
 	Printf("Append return %d!", seq)
 	// You will have to modify this function.

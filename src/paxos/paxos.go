@@ -30,6 +30,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 const DEBUG = true
@@ -178,7 +179,7 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 // is reached.
 //
 func (px *Paxos) Start(seq int, v interface{}) {
-	px.Logf("Paxos start!")
+	px.Logf("Paxos start %d!", seq)
 	go func() {
 		px.Propose(v, seq)
 	}()
@@ -274,8 +275,6 @@ func (px *Paxos) minFromPeer(newMin int, peer int) {
 	px.lock.Lock()
 	defer px.lock.Unlock()
 
-	px.Logf("minFromPeer(%d,%d)\n", newMin, peer)
-
 	if newMin > px.mins[peer] {
 		px.Logf("New min from %d: %d \n", peer, newMin)
 		px.mins[peer] = newMin
@@ -310,7 +309,6 @@ func (px *Paxos) freeResources(prevMin int) {
 }
 
 func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority bool, highest_n int, highest_v interface{}) {
-	px.Logf("RPCMajority(%s)\n", rpcname)
 
 	// Keep all the OK responses
 	okResponses := make(chan PrepAcceptRet, px.n_peers)
@@ -347,6 +345,9 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 		case resp := <-notOkResponses:
 			numberNotOk++
 			px.minFromPeer(resp.Min, resp.Peer_n)
+		case <-time.After(1 * time.Second):
+			//Timeout!
+			numberNotOk++
 		}
 
 		if numberOk >= px.majority {
@@ -393,7 +394,6 @@ func (px *Paxos) RPCAttempt(peer string, me bool, rpcname string, args interface
 
 		//Retry RPC up to 3 times
 		for i := 0; i < 3 && !ok; i++ {
-			px.Logf("call(%s,%s)\n", peer, rpcname)
 
 			select {
 			case <-done:
@@ -404,7 +404,7 @@ func (px *Paxos) RPCAttempt(peer string, me bool, rpcname string, args interface
 			default:
 				ok = call(peer, rpcname, args, &ret)
 				if !ok {
-					px.Logf("Retrying call(%s,%s)\n", peer, rpcname)
+					//px.Logf("Retrying call(%s,%s)\n", peer, rpcname)
 				}
 			}
 		}
@@ -420,7 +420,7 @@ func (px *Paxos) RPCAttempt(peer string, me bool, rpcname string, args interface
 
 func (px *Paxos) Propose(val interface{}, Seq int) {
 
-	px.Logf("Propose(%d)\n", Seq)
+	//	px.Logf("Propose(%d)\n", Seq)
 
 	//Data race condition
 	px.lock.Lock()
@@ -508,7 +508,7 @@ func (px *Paxos) sendDecided(args DecidedArgs, ret DecidedRet, peer string) {
 }
 
 func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
-	px.Logf("Decided(%d)\n", args.Seq)
+	//	px.Logf("Decided(%d)\n", args.Seq)
 
 	px.lock.Lock()
 	if args.Seq > px.maxSeq {
@@ -530,7 +530,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 }
 
 func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
-	px.Logf("Prepare(%d)\n", args.Seq)
+	//	px.Logf("Prepare(%d)\n", args.Seq)
 
 	px.minFromPeer(args.Min, args.Peer_n)
 
@@ -570,7 +570,7 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 }
 
 func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
-	px.Logf("Accept(%d)\n", args.Seq)
+	//	px.Logf("Accept(%d)\n", args.Seq)
 
 	px.minFromPeer(args.Min, args.Peer_n)
 
