@@ -14,10 +14,6 @@ import "os"
 import "syscall"
 import "encoding/gob"
 import "math/rand"
-import (
-	"net/http"
-	_ "net/http/pprof"
-)
 
 const Debug = 0
 
@@ -147,7 +143,6 @@ func (kv *KVPaxos) addToPaxos(seq int, op Op) (retseq int) {
 		val, err := kv.waitForPaxos(seq)
 
 		if err != nil {
-			//TODO check err
 			kv.Logf("ERRRROROOROROO!!!")
 			continue
 		}
@@ -239,75 +234,6 @@ func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}, err error) {
 
 }
 
-//TODO: Remove these notes
-//Two approaches: Make sure we never put duplicates in paxos log:
-//To do so I have to not propose something with Seq = n before commitpoint == n-1
-//and there has been no duplicates. Might be slow? Why? Because I cannot start mutliple
-//paxos instances at once. Is this problem? dunno.
-
-//Allow duplicates in paxos log, but filter them out on application. This way I can just
-//call paxos as I do right now, and check on application. How do I check on application?
-//A map? No. I can keep th... hmm.. ClientSeq is always in order!!! :D So, if I get to clientseq n,
-//there is not going to be duplicate of n-1. So I keep track of biggest clientseq per client.
-//If I get the same or lower I reject!!! Is this garuantied to work>?!
-
-/*
-func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, clientSeq int) (seq int, retErr error) {
-	nr := kv.nextOpNr()
-	logEntry := Op{Type: op, Key: key, Value: val, Opnr: nr, Server: kv.me, Client: client, ClientSeq: clientSeq}
-
-	kv.Logf("Adding log entry %d(%s)", op, key)
-	for !kv.isdead() {
-		kv.lock.Lock()
-		kv.seq++
-		seq := kv.seq
-		kv.lock.Unlock()
-
-		if op == Get {
-			kv.Logf("Waiting for lock 1")
-			kv.lock.Lock()
-			kv.Logf("Got lock 1")
-			if _, ok := kv.getRequestChannels[seq]; ok {
-				//Somebody else is already trying a get with this seq, better give up.
-				kv.lock.Unlock()
-				continue
-			}
-			channel := make(chan string, 512)
-			kv.Logf("Adding get channel at %d", seq)
-			kv.getRequestChannels[seq] = channel
-			kv.lock.Unlock()
-		}
-
-		kv.px.Start(seq, logEntry)
-
-		val, err := kv.waitForPaxos(seq)
-
-		if err != nil {
-			if op == Get {
-				kv.lock.Lock()
-				delete(kv.getRequestChannels, seq)
-				kv.lock.Unlock()
-			}
-			return -1, err
-		}
-
-		kv.Logf("AddLogEntry successful!")
-		if val == logEntry {
-			kv.Logf("Completed adding log entry %d(%s)", op, key)
-			return seq, nil
-		} else {
-			kv.Logf("Other operation first!")
-			if op == Get {
-				kv.lock.Lock()
-				delete(kv.getRequestChannels, seq)
-				kv.lock.Unlock()
-			}
-		}
-	}
-	return -1, nil
-
-}*/
-
 // tell the server to shut itself down.
 // please do not change these two functions.
 func (kv *KVPaxos) kill() {
@@ -365,9 +291,6 @@ func StartServer(servers []string, me int) *KVPaxos {
 
 	go kv.sequentialApplier()
 
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
 	// please do not change any of the following code,
 	// or do anything to subvert it.
 
