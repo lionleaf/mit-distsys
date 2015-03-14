@@ -115,7 +115,7 @@ func (kv *KVPaxos) applyLoop() {
 				kv.Logf("ERROR: Still waiting for paxos: %d status Forgotten!!! (or something weird)", seq)
 			}
 			time.Sleep(to)
-			if to > 500*time.Millisecond && seq < kv.px.Max() && lastDummy < seq {
+			if to > 500*time.Millisecond && seq <= kv.px.Max() && lastDummy < seq {
 				kv.Logf("Starting a dummy operation for: %d getting status %d", seq, status)
 				kv.px.Start(seq, Op{Type: Get, Key: "", Value: "", Opnr: -1, Server: -1})
 				lastDummy = seq //Avoid multiple dummies at same seq
@@ -130,10 +130,9 @@ func (kv *KVPaxos) applyLoop() {
 
 		clientSeq := op.ClientSeq
 		lastClientSeq := kv.clientSeqs[op.Client]
-
-		kv.Logf("Applying operation to database!")
-
 		kv.clientSeqs[op.Client] = clientSeq
+
+		kv.Logf("Applying operation to database (seq,client,clientseq) (%d,%d,%d)!", seq, op.Client, clientSeq)
 
 		switch op.Type {
 		case Put:
@@ -153,14 +152,21 @@ func (kv *KVPaxos) applyLoop() {
 			kv.Logf("Get request! server: %d, me: %d ", op.Server, kv.me)
 			if op.Server == kv.me {
 				kv.lock.Lock()
-				channel := kv.getRequestChannels[seq]
+				channel, ok := kv.getRequestChannels[seq]
 				kv.lock.Unlock()
-				kv.Logf("Sending get value through channel: %d", seq)
-				channel <- kv.database[op.Key]
+
+				if ok {
+					kv.Logf("Sending get value through channel: %d", seq)
+					channel <- kv.database[op.Key]
+				} else {
+
+					kv.Logf("No get return channel for seq: %d", seq)
+					kv.Logf(": %d", seq)
+				}
 			}
 		}
 
-		//TODO: kv.px.Done(seq)
+		kv.px.Done(seq)
 		kv.nextCommitSeq++
 	}
 }
@@ -174,42 +180,65 @@ func (kv *KVPaxos) nextOpNr() int {
 
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 
-	seq := kv.AddLogEntry(Get, args.Key, "", args.Client, args.ClientSeq)
+	seq, err := kv.AddLogEntry(Get, args.Key, "", args.Client, args.ClientSeq)
+
+	if err != nil {
+		return err
+	}
 
 	kv.lock.Lock()
-	returnChan := kv.getRequestChannels[seq]
+	returnChan, ok := kv.getRequestChannels[seq]
 	kv.lock.Unlock()
+
+	if !ok {
+		kv.Logf("Error getting channel! %d", seq)
+		return fmt.Errorf("Error getting channel! %d", seq)
+	}
 
 	kv.Logf("Get added to log! Waiting on channel %d", seq)
-	reply.Value = <-returnChan
+	select {
+	case reply.Value = <-returnChan:
+		kv.Logf("Channel returned get value")
+		kv.lock.Lock()
+		delete(kv.getRequestChannels, seq)
+		kv.lock.Unlock()
 
-	kv.Logf("Channel returned get value")
-	kv.lock.Lock()
-	delete(kv.getRequestChannels, seq)
-	kv.lock.Unlock()
+		err = nil //No error! :D
+	case <-time.After(3 * time.Second):
+		kv.Logf("Get timeout")
+		kv.lock.Lock()
+		delete(kv.getRequestChannels, seq)
+		kv.lock.Unlock()
 
-	return nil
+		err = fmt.Errorf("Get timeout %d", seq)
+	}
+
+	return err
 }
 
 func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	kv.Logf("Server PutAppend!")
-	kv.AddLogEntry(args.Op, args.Key, args.Value, args.Client, args.ClientSeq)
-	return nil
+	_, err := kv.AddLogEntry(args.Op, args.Key, args.Value, args.Client, args.ClientSeq)
+	return err
 }
 
-func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}) {
+func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}, err error) {
 
 	var status paxos.Fate
 	to := 10 * time.Millisecond
 	for {
 		status, val = kv.px.Status(seq)
-		if status == paxos.Decided || kv.isdead() {
+		if status == paxos.Decided || status == paxos.Forgotten || kv.isdead() {
+			err = nil
 			return
 		}
 		kv.Logf("Still waiting for paxos: %d", seq)
 		time.Sleep(to)
-		if to < 10*time.Second {
+		if to < 3*time.Second {
 			to *= 2
+		} else {
+			err = fmt.Errorf("Wait for paxos timeout!1")
+			return
 		}
 	}
 
@@ -227,7 +256,7 @@ func (kv *KVPaxos) waitForPaxos(seq int) (val interface{}) {
 //there is not going to be duplicate of n-1. So I keep track of biggest clientseq per client.
 //If I get the same or lower I reject!!! Is this garuantied to work>?!
 
-func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, clientSeq int) (seq int) {
+func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, clientSeq int) (seq int, retErr error) {
 	nr := kv.nextOpNr()
 	logEntry := Op{Type: op, Key: key, Value: val, Opnr: nr, Server: kv.me, Client: client, ClientSeq: clientSeq}
 
@@ -236,7 +265,6 @@ func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, cl
 		kv.lock.Lock()
 		kv.seq++
 		seq := kv.seq
-		//TODO: Add duplicate check?
 		kv.lock.Unlock()
 
 		if op == Get {
@@ -248,7 +276,7 @@ func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, cl
 				kv.lock.Unlock()
 				continue
 			}
-			channel := make(chan string, 1)
+			channel := make(chan string, 512)
 			kv.Logf("Adding get channel at %d", seq)
 			kv.getRequestChannels[seq] = channel
 			kv.lock.Unlock()
@@ -256,25 +284,31 @@ func (kv *KVPaxos) AddLogEntry(op OpType, key string, val string, client int, cl
 
 		kv.px.Start(seq, logEntry)
 
-		val := kv.waitForPaxos(seq)
+		val, err := kv.waitForPaxos(seq)
+
+		if err != nil {
+			if op == Get {
+				kv.lock.Lock()
+				delete(kv.getRequestChannels, seq)
+				kv.lock.Unlock()
+			}
+			return -1, err
+		}
 
 		kv.Logf("AddLogEntry successful!")
 		if val == logEntry {
 			kv.Logf("Completed adding log entry %d(%s)", op, key)
-			return seq
+			return seq, nil
 		} else {
 			kv.Logf("Other operation first!")
 			if op == Get {
-				kv.Logf("Waiting for lock 2")
 				kv.lock.Lock()
-				kv.Logf("Got lock 2")
-				kv.Logf("Removing channel!")
 				delete(kv.getRequestChannels, seq)
 				kv.lock.Unlock()
 			}
 		}
 	}
-	return -1
+	return -1, nil
 
 }
 

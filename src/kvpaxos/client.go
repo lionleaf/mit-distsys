@@ -3,6 +3,7 @@ package kvpaxos
 import (
 	"net/rpc"
 	"sync"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
@@ -72,6 +73,7 @@ func call(srv string, rpcname string,
 	}
 
 	fmt.Println(err)
+	Printf("ERROR: %s ", err.Error())
 	return false
 }
 
@@ -98,12 +100,21 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{Key: key, Client: ck.me, ClientSeq: seq}
 	reply := GetReply{}
 
+	server := int(nrand()) % len(ck.servers)
 	ok := false
 	for !ok {
-		server := int(nrand()) % len(ck.servers)
 		Printf("Calling Get on server: %d (clientID, clientSeq): (%d,%d)", server, ck.me, seq)
 		ok = call(ck.servers[server], "KVPaxos.Get", args, &reply)
 		Printf("Get returned from server: %d clientSeq: (%d, %d)  OK: %t", server, ck.me, seq, ok)
+		to := 10 * time.Millisecond
+		if !ok {
+			server = (server + 1) % len(ck.servers)
+			Printf("Trying new server: %d, nr of servers: %d", server, len(ck.servers))
+			time.Sleep(to)
+			if to < 10*time.Second {
+				to *= 2
+			}
+		}
 	}
 	Printf("Get return (client, seq) (%d, %d)!", ck.me, seq)
 	return reply.Value
@@ -128,10 +139,19 @@ func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	reply := PutAppendReply{}
 
 	ok := false
+	server := int(nrand()) % len(ck.servers)
 	for !ok {
-		server := int(nrand()) % len(ck.servers)
 		Printf("Calling PutAppend on server: %d (clientID, clientSeq): (%d,%d)", server, ck.me, seq)
 		ok = call(ck.servers[server], "KVPaxos.PutAppend", args, &reply)
+		to := 10 * time.Millisecond
+		if !ok {
+			server = (server + 1) % len(ck.servers)
+			Printf("Trying new server: %d", server)
+			time.Sleep(to)
+			if to < 10*time.Second {
+				to *= 2
+			}
+		}
 	}
 	Printf("Append return %d!", seq)
 	// You will have to modify this function.
