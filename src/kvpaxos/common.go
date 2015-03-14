@@ -2,7 +2,7 @@ package kvpaxos
 
 import "fmt"
 
-const debug = true
+const debug = false
 
 func Printf(format string, a ...interface{}) {
 	if !debug {

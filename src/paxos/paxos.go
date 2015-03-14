@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-const DEBUG = true
+const DEBUG = false
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -69,7 +69,6 @@ type Paxos struct {
 	decided    map[int]bool
 
 	mins      []int
-	min       int
 	globalMin int
 
 	//Proposer data, organized in maps
@@ -194,7 +193,7 @@ func (px *Paxos) Start(seq int, v interface{}) {
 func (px *Paxos) Done(seq int) {
 	px.lock.Lock()
 	defer px.lock.Unlock()
-	px.min = seq
+	px.mins[px.me] = seq
 	px.updateGlobalMin()
 }
 
@@ -435,7 +434,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 		px.lock.Lock()
 		n := rndAbove(px.n_highest[Seq])
 
-		prepArgs := PrepareArgs{n, Seq, px.min, px.me}
+		prepArgs := PrepareArgs{n, Seq, px.mins[px.me], px.me}
 		px.lock.Unlock()
 
 		prepMajority, highest_n, highest_v := px.attemptRPCMajority("Paxos.Prepare", prepArgs)
@@ -469,7 +468,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 				decidedArgs := DecidedArgs{
 					Value:  highest_v,
 					Seq:    Seq,
-					Min:    px.min,
+					Min:    px.mins[px.me],
 					Peer_n: px.me}
 				px.lock.Unlock()
 
@@ -522,7 +521,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	}
 
 	ret.OK = true
-	ret.Min = px.min
+	ret.Min = px.mins[px.me]
 	ret.Peer_n = px.me
 
 	px.lock.Unlock()
@@ -536,7 +535,7 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 
 	//For memory management
 	px.lock.Lock()
-	ret.Min = px.min
+	ret.Min = px.mins[px.me]
 	ret.Peer_n = px.me
 
 	if args.Seq > px.maxSeq {
