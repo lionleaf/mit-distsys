@@ -1,7 +1,6 @@
 package shardmaster
 
 import (
-	"container/heap"
 	"math/rand"
 	"net"
 	"time"
@@ -239,38 +238,8 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 		groupToShards[GUID] = append(groupToShards[GUID], i)
 	}
 
-	maxheap := make(MaxHeap, len(groupToShards))
-	minheap := make(MinHeap, len(groupToShards))
-
-	c := 0
-	for GUID, shards := range groupToShards {
-		if GUID == 0 {
-			continue
-		}
-
-
-		What to do now: Scrap heaps. Implement slow getmax and getmin instead. Much better, yo.
-
-		shards_arr := shards
-		nShards := len(shards)
-		item := Item{
-			GUID:      GUID,
-			shards:    &shards_arr,
-			nOfShards: &nShards,
-			index:     c,
-		}
-		maxheap[c] = item
-		minheap[c] = item
-
-		sm.Logf("Adding %d to heaps with length %d! ", GUID, len(shards))
-		c++
-	}
-
-	heap.Init(&maxheap)
-	heap.Init(&minheap)
-
-	minGroupSize := *minheap.Peek().(Item).nOfShards
-	maxGroupSize := *maxheap.Peek().(Item).nOfShards
+	minGUID, minGroupSize := getMin(groupToShards)
+	maxGUID, maxGroupSize := getMax(groupToShards)
 
 	minShardsPerGroup := nShards / nGroups
 	maxShardsPerGroup := minShardsPerGroup
@@ -281,8 +250,8 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 	for len(groupToShards[0]) > 0 || minGroupSize < minShardsPerGroup || maxGroupSize > maxShardsPerGroup {
 		sm.Logf("Rebalance iteration! ")
 		sm.Logf("%d > 0! ", len(groupToShards[0]))
-		sm.Logf("min %d < %d! ", minGroupSize, minShardsPerGroup)
-		sm.Logf("max %d > %d! ", maxGroupSize, maxShardsPerGroup)
+		sm.Logf("min %d < %d (GUID: %d)! ", minGroupSize, minShardsPerGroup, minGUID)
+		sm.Logf("max %d > %d!(GUID: %d) ", maxGroupSize, maxShardsPerGroup, maxGUID)
 
 		shardsInInvalidGroup := len(groupToShards[0])
 		if shardsInInvalidGroup > 0 {
@@ -292,54 +261,46 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 				moveshard := groupToShards[0][0] //Remove the first on
 				groupToShards[0] = sliceDel(groupToShards[0], 0)
 
-				minItem := heap.Pop(&minheap).(Item)
+				minGUID, _ := getMin(groupToShards)
 
-				minItem.shards = append(minItem.shards, moveshard)
-				minItem.nOfShards++
+				groupToShards[minGUID] = append(groupToShards[minGUID], moveshard)
 
-				newConfig.Shards[moveshard] = minItem.GUID
-				heap.Push(&minheap, minItem)
-				heap.Init(&maxheap)
+				newConfig.Shards[moveshard] = minGUID
 
 			}
-			minGroupSize = minheap.Peek().(Item).nOfShards
-			maxGroupSize = maxheap.Peek().(Item).nOfShards
+			_, minGroupSize = getMin(groupToShards)
+			_, maxGroupSize = getMax(groupToShards)
 			continue
 		}
 
-		maxitem := heap.Pop(&maxheap).(Item)
-		minitem := heap.Pop(&minheap).(Item)
-		sm.Logf("Biggest group has %d shards!", maxitem.nOfShards)
-		sm.Logf("len(maxheap) = %d!", len(maxheap))
+		minGUID, minGroupSize = getMin(groupToShards)
+		maxGUID, maxGroupSize = getMax(groupToShards)
+		sm.Logf("min %d (GUID: %d) ", minGroupSize, minGUID)
+		sm.Logf("max %d (GUID: %d) ", maxGroupSize, maxGUID)
 
-		sm.Logf("Smallest group has %d shards!", minitem.nOfShards)
-		sm.Logf("len(minheap) = %d!", len(minheap))
-
-		maxCanGive := maxitem.nOfShards - maxShardsPerGroup
-		minNeeds := minShardsPerGroup - minitem.nOfShards
+		maxCanGive := maxGroupSize - minShardsPerGroup
+		minNeeds := minShardsPerGroup - minGroupSize
 
 		shardsToMove := minNeeds
 		if maxCanGive < minNeeds {
 			shardsToMove = maxCanGive
 		}
-		sm.Logf("Moving %d shards!", shardsToMove)
+		sm.Logf("Moving %d shards: minNeeds %d, maxCanGive  %d!", shardsToMove, minNeeds, maxCanGive)
 
 		for i := 0; i < shardsToMove; i++ {
-			moveshard := maxitem.shards[i]
+			moveshard := groupToShards[maxGUID][i]
 
-			minitem.shards = append(minitem.shards, moveshard)
-			minitem.nOfShards++
+			groupToShards[minGUID] = append(groupToShards[minGUID], moveshard)
 
-			maxitem.shards = sliceDel(maxitem.shards, i)
-			maxitem.nOfShards--
+			groupToShards[maxGUID] = sliceDel(groupToShards[maxGUID], i)
 
-			newConfig.Shards[moveshard] = minitem.GUID
+			newConfig.Shards[moveshard] = minGUID
 		}
-		heap.Push(&maxheap, maxitem)
-		heap.Push(&minheap, minitem)
 
-		minGroupSize = minheap.Peek().(Item).nOfShards
-		maxGroupSize = maxheap.Peek().(Item).nOfShards
+		_, minGroupSize = getMin(groupToShards)
+		_, maxGroupSize = getMax(groupToShards)
+		sm.Logf("min %d < %d (GUID: %d)! ", minGroupSize, minShardsPerGroup, minGUID)
+		sm.Logf("max %d > %d!(GUID: %d) ", maxGroupSize, maxShardsPerGroup, maxGUID)
 
 	}
 
@@ -347,11 +308,35 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 
 }
 
-func getMax() {
+func getMax(groupToShards map[int64][]int) (GUID int64, nShards int) {
+	for guid, shards := range groupToShards {
+		if guid == 0 {
+			//GUID 0 is invalid and should not be counted
+			continue
+		}
+		if len(shards) > nShards {
+			GUID = guid
+			nShards = len(shards)
+		}
+	}
+	return
 }
 
-func getMin() {
+func getMin(groupToShards map[int64][]int) (GUID int64, nShards int) {
+	nShards = 2147483647 //Max signed int32 int is 32 or 64, so this will fit
+	for guid, shards := range groupToShards {
+		if guid == 0 {
+			//GUID 0 is invalid and should not be counted
+			continue
+		}
+		if len(shards) < nShards {
+			GUID = guid
+			nShards = len(shards)
+		}
+	}
+	return
 }
+
 func sliceDel(a []int, i int) []int {
 	return append(a[:i], a[i+1:]...)
 }
