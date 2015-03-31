@@ -1,20 +1,20 @@
 package shardmaster
 
 import (
+	"container/heap"
+	"math/rand"
 	"net"
 	"time"
 )
 import "fmt"
 import "net/rpc"
 import "log"
-
 import "paxos"
 import "sync"
 import "sync/atomic"
 import "os"
 import "syscall"
 import "encoding/gob"
-import "math/rand"
 
 const Debug = true
 
@@ -46,6 +46,9 @@ type ShardMaster struct {
 
 	opReqChan    chan OpReq
 	lastDummySeq int //Seq of last time we launched a dummy op to fill a hole
+	activeGIDs   []int64
+
+	lastConfig int
 
 	configs []Config // indexed by config num
 }
@@ -62,16 +65,16 @@ type Op struct {
 type OpType int
 
 const (
-	Join OpType = iota + 1
-	Leave
-	Move
-	Query
+	JoinOp OpType = iota + 1
+	LeaveOp
+	MoveOp
+	QueryOp
 	Dummy
 )
 
 type OpReq struct {
 	op        Op
-	replyChan chan string
+	replyChan chan Config
 }
 
 func (sm *ShardMaster) sequentialApplier() {
@@ -85,13 +88,18 @@ func (sm *ShardMaster) sequentialApplier() {
 			seq = sm.addToPaxos(seq, op)
 			sm.Logf("Operation added to paxos log at %d", seq)
 
-			/* TODO remove
-			if opreq.op.Type == Get {
-				kv.Logf("Get applied! Feeding value through channel. %d", seq)
-				opreq.replyChan <- kv.database[op.Key]
+			if op.Type == QueryOp {
+				if op.Num < 0 {
+					//Returning latest config
+					opreq.replyChan <- sm.configs[sm.lastConfig]
+					sm.Logf("Query applied! Feeding value config nr %d through channel. %d", sm.lastConfig, seq)
+				} else {
+					opreq.replyChan <- sm.configs[op.Num]
+					sm.Logf("Query applied! Feeding value config nr %d through channel. %d", op.Num, seq)
+				}
 			} else {
-				opreq.replyChan <- "yey"
-			}*/
+				opreq.replyChan <- Config{}
+			}
 
 		case <-time.After(50 * time.Millisecond):
 			sm.Logf("Ping")
@@ -149,7 +157,7 @@ func (sm *ShardMaster) addToPaxos(seq int, op Op) (retseq int) {
 		seq++
 
 		//Did work?
-		if val.(Op).O == op {
+		if val.(Op).OpID == op.OpID {
 			sm.Logf("Applied operation in log at seq %d", seq-1)
 			return seq
 		} else {
@@ -191,36 +199,228 @@ func (sm *ShardMaster) waitForPaxos(seq int) (val interface{}, err error) {
 func (sm *ShardMaster) applyOp(op Op) {
 	sm.Logf("Applying op to database")
 	switch op.Type {
-	case Join:
+	case JoinOp:
 		sm.Logf("Join, you guys!")
+		sm.ApplyJoin(op.GID, op.Servers)
+	case LeaveOp:
+		sm.Logf("Leave op applied!")
+	case MoveOp:
+		sm.Logf("Move op applied!")
+	case QueryOp:
+		//Do nothing
+	case Dummy:
+		//Do nothing
 	}
 }
 
+func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
+	sm.activeGIDs = append(sm.activeGIDs, GID)
+	newConfig := sm.makeNewConfig()
+	newConfig.Groups[GID] = Servers
+
+	//Redistribute shards.
+
+	nShards := len(newConfig.Shards)
+	nGroups := 0
+
+	for _, _ = range newConfig.Groups {
+		nGroups++
+	}
+
+	groupToShards := make(map[int64][]int)
+
+	groupToShards[0] = []int{}
+	for _, GUID := range sm.activeGIDs {
+		groupToShards[GUID] = []int{}
+	}
+
+	for i, v := range newConfig.Shards {
+		GUID := v
+		groupToShards[GUID] = append(groupToShards[GUID], i)
+	}
+
+	maxheap := make(MaxHeap, len(groupToShards))
+	minheap := make(MinHeap, len(groupToShards))
+
+	c := 0
+	for GUID, shards := range groupToShards {
+		if GUID == 0 {
+			continue
+		}
+
+
+		What to do now: Scrap heaps. Implement slow getmax and getmin instead. Much better, yo.
+
+		shards_arr := shards
+		nShards := len(shards)
+		item := Item{
+			GUID:      GUID,
+			shards:    &shards_arr,
+			nOfShards: &nShards,
+			index:     c,
+		}
+		maxheap[c] = item
+		minheap[c] = item
+
+		sm.Logf("Adding %d to heaps with length %d! ", GUID, len(shards))
+		c++
+	}
+
+	heap.Init(&maxheap)
+	heap.Init(&minheap)
+
+	minGroupSize := *minheap.Peek().(Item).nOfShards
+	maxGroupSize := *maxheap.Peek().(Item).nOfShards
+
+	minShardsPerGroup := nShards / nGroups
+	maxShardsPerGroup := minShardsPerGroup
+	if nShards%nGroups > 0 {
+		maxShardsPerGroup += 1
+	}
+
+	for len(groupToShards[0]) > 0 || minGroupSize < minShardsPerGroup || maxGroupSize > maxShardsPerGroup {
+		sm.Logf("Rebalance iteration! ")
+		sm.Logf("%d > 0! ", len(groupToShards[0]))
+		sm.Logf("min %d < %d! ", minGroupSize, minShardsPerGroup)
+		sm.Logf("max %d > %d! ", maxGroupSize, maxShardsPerGroup)
+
+		shardsInInvalidGroup := len(groupToShards[0])
+		if shardsInInvalidGroup > 0 {
+			for i := 0; i < shardsInInvalidGroup; i++ {
+				sm.Logf("Rebalance 0 iteration!")
+
+				moveshard := groupToShards[0][0] //Remove the first on
+				groupToShards[0] = sliceDel(groupToShards[0], 0)
+
+				minItem := heap.Pop(&minheap).(Item)
+
+				minItem.shards = append(minItem.shards, moveshard)
+				minItem.nOfShards++
+
+				newConfig.Shards[moveshard] = minItem.GUID
+				heap.Push(&minheap, minItem)
+				heap.Init(&maxheap)
+
+			}
+			minGroupSize = minheap.Peek().(Item).nOfShards
+			maxGroupSize = maxheap.Peek().(Item).nOfShards
+			continue
+		}
+
+		maxitem := heap.Pop(&maxheap).(Item)
+		minitem := heap.Pop(&minheap).(Item)
+		sm.Logf("Biggest group has %d shards!", maxitem.nOfShards)
+		sm.Logf("len(maxheap) = %d!", len(maxheap))
+
+		sm.Logf("Smallest group has %d shards!", minitem.nOfShards)
+		sm.Logf("len(minheap) = %d!", len(minheap))
+
+		maxCanGive := maxitem.nOfShards - maxShardsPerGroup
+		minNeeds := minShardsPerGroup - minitem.nOfShards
+
+		shardsToMove := minNeeds
+		if maxCanGive < minNeeds {
+			shardsToMove = maxCanGive
+		}
+		sm.Logf("Moving %d shards!", shardsToMove)
+
+		for i := 0; i < shardsToMove; i++ {
+			moveshard := maxitem.shards[i]
+
+			minitem.shards = append(minitem.shards, moveshard)
+			minitem.nOfShards++
+
+			maxitem.shards = sliceDel(maxitem.shards, i)
+			maxitem.nOfShards--
+
+			newConfig.Shards[moveshard] = minitem.GUID
+		}
+		heap.Push(&maxheap, maxitem)
+		heap.Push(&minheap, minitem)
+
+		minGroupSize = minheap.Peek().(Item).nOfShards
+		maxGroupSize = maxheap.Peek().(Item).nOfShards
+
+	}
+
+	sm.configs = append(sm.configs, newConfig)
+
+}
+
+func getMax() {
+}
+
+func getMin() {
+}
+func sliceDel(a []int, i int) []int {
+	return append(a[:i], a[i+1:]...)
+}
+
+func (sm *ShardMaster) makeNewConfig() Config {
+	oldConfig := sm.configs[sm.lastConfig]
+	newConfig := Config{Groups: make(map[int64][]string)}
+
+	newConfig.Num = oldConfig.Num + 1
+	sm.lastConfig = newConfig.Num
+
+	newConfig.Shards = oldConfig.Shards //TODO: Does this work?
+
+	for k, v := range oldConfig.Groups {
+		newConfig.Groups[k] = v
+	}
+
+	return newConfig
+}
+
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) error {
+	op := Op{Type: JoinOp, OpID: rand.Int63(), GID: args.GID, Servers: args.Servers}
 
-	op := Op{GID: args.GID, Servers: args.Servers}
-
-	opReq := OpReq{op, make(chan string, 1)}
+	opReq := OpReq{op, make(chan Config, 1)}
 
 	sm.opReqChan <- opReq
+
+	sm.Logf("Waiting on return channel!")
 	<-opReq.replyChan
+	sm.Logf("Got return!")
 	return nil
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) error {
-	// Your code here.
+	op := Op{Type: LeaveOp, OpID: rand.Int63(), GID: args.GID}
 
+	opReq := OpReq{op, make(chan Config, 1)}
+
+	sm.opReqChan <- opReq
+
+	sm.Logf("Waiting on return channel!")
+	<-opReq.replyChan
+	sm.Logf("Got return!")
 	return nil
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) error {
-	// Your code here.
+	op := Op{Type: MoveOp, OpID: rand.Int63(), GID: args.GID, Shard: args.Shard}
 
+	opReq := OpReq{op, make(chan Config, 1)}
+
+	sm.opReqChan <- opReq
+
+	sm.Logf("Waiting on return channel!")
+	<-opReq.replyChan
+	sm.Logf("Got return!")
 	return nil
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
-	// Your code here.
+	op := Op{Type: QueryOp, OpID: rand.Int63(), Num: args.Num}
+
+	opReq := OpReq{op, make(chan Config, 1)}
+
+	sm.opReqChan <- opReq
+
+	sm.Logf("Waiting on return channel!")
+	reply.Config = <-opReq.replyChan
+	sm.Logf("Got return!")
 
 	return nil
 }
