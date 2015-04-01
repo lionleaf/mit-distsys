@@ -15,7 +15,7 @@ import "os"
 import "syscall"
 import "encoding/gob"
 
-const Debug = true
+const Debug = false
 
 var log_mu sync.Mutex
 
@@ -44,8 +44,8 @@ type ShardMaster struct {
 	px         *paxos.Paxos
 
 	opReqChan    chan OpReq
-	lastDummySeq int //Seq of last time we launched a dummy op to fill a hole
-	activeGIDs   []int64
+	lastDummySeq int            //Seq of last time we launched a dummy op to fill a hole
+	activeGIDs   map[int64]bool //If inactive remove from map instead of setting to false
 
 	lastConfig int
 
@@ -202,8 +202,10 @@ func (sm *ShardMaster) applyOp(op Op) {
 		sm.Logf("Join, you guys!")
 		sm.ApplyJoin(op.GID, op.Servers)
 	case LeaveOp:
+		sm.ApplyLeave(op.GID)
 		sm.Logf("Leave op applied!")
 	case MoveOp:
+		sm.ApplyMove(op.GID, op.Shard)
 		sm.Logf("Move op applied!")
 	case QueryOp:
 		//Do nothing
@@ -212,12 +214,39 @@ func (sm *ShardMaster) applyOp(op Op) {
 	}
 }
 
+func (sm *ShardMaster) ApplyMove(GID int64, Shard int) {
+	newConfig := sm.makeNewConfig()
+	newConfig.Shards[Shard] = GID
+	sm.configs = append(sm.configs, newConfig)
+}
+
 func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
-	sm.activeGIDs = append(sm.activeGIDs, GID)
+	sm.activeGIDs[GID] = true
 	newConfig := sm.makeNewConfig()
 	newConfig.Groups[GID] = Servers
 
-	//Redistribute shards.
+	sm.rebalanceShards(&newConfig)
+
+	sm.configs = append(sm.configs, newConfig)
+
+}
+
+func (sm *ShardMaster) ApplyLeave(GID int64) {
+	delete(sm.activeGIDs, GID)
+	newConfig := sm.makeNewConfig()
+	delete(newConfig.Groups, GID)
+	for i, group := range newConfig.Shards {
+		if group == GID {
+			newConfig.Shards[i] = 0 //Set to invalid group. Will be distributed by the rebalance
+		}
+	}
+
+	sm.rebalanceShards(&newConfig)
+
+	sm.configs = append(sm.configs, newConfig)
+}
+
+func (sm *ShardMaster) rebalanceShards(newConfig *Config) {
 
 	nShards := len(newConfig.Shards)
 	nGroups := 0
@@ -229,7 +258,7 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 	groupToShards := make(map[int64][]int)
 
 	groupToShards[0] = []int{}
-	for _, GUID := range sm.activeGIDs {
+	for GUID, _ := range sm.activeGIDs {
 		groupToShards[GUID] = []int{}
 	}
 
@@ -266,6 +295,7 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 				groupToShards[minGUID] = append(groupToShards[minGUID], moveshard)
 
 				newConfig.Shards[moveshard] = minGUID
+				sm.Logf("Moving shard %d to group %d", moveshard, minGUID)
 
 			}
 			_, minGroupSize = getMin(groupToShards)
@@ -295,6 +325,7 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 			groupToShards[maxGUID] = sliceDel(groupToShards[maxGUID], i)
 
 			newConfig.Shards[moveshard] = minGUID
+			sm.Logf("Moving shard %d to group %d", moveshard, minGUID)
 		}
 
 		_, minGroupSize = getMin(groupToShards)
@@ -304,8 +335,6 @@ func (sm *ShardMaster) ApplyJoin(GID int64, Servers []string) {
 
 	}
 
-	sm.configs = append(sm.configs, newConfig)
-
 }
 
 func getMax(groupToShards map[int64][]int) (GUID int64, nShards int) {
@@ -314,7 +343,7 @@ func getMax(groupToShards map[int64][]int) (GUID int64, nShards int) {
 			//GUID 0 is invalid and should not be counted
 			continue
 		}
-		if len(shards) > nShards {
+		if len(shards) >= nShards {
 			GUID = guid
 			nShards = len(shards)
 		}
@@ -338,6 +367,10 @@ func getMin(groupToShards map[int64][]int) (GUID int64, nShards int) {
 }
 
 func sliceDel(a []int, i int) []int {
+	return append(a[:i], a[i+1:]...)
+}
+
+func sliceDelInt64(a []int64, i int) []int64 {
 	return append(a[:i], a[i+1:]...)
 }
 
@@ -446,6 +479,7 @@ func StartServer(servers []string, me int) *ShardMaster {
 
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int64][]string{}
+	sm.activeGIDs = map[int64]bool{}
 
 	sm.opReqChan = make(chan OpReq)
 
