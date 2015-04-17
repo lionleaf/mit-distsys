@@ -20,7 +20,27 @@ import "shardmaster"
 //Debugging: TODO: remove
 import _ "net/http/pprof"
 
-const Debug = 0
+type ShardKV struct {
+	mu         sync.Mutex
+	l          net.Listener
+	me         int
+	dead       int32 // for testing
+	unreliable int32 // for testing
+	sm         *shardmaster.Clerk
+	px         *paxos.Paxos
+
+	gid int64 // my replica group ID
+
+	lastDummySeq int //Seq of last time we launched a dummy op to fill a hole
+	database     map[string]string
+	clientSeqs   map[int]int
+	opReqChan    chan OpReq
+
+	currentConfig shardmaster.Config
+	myShard       map[int]bool //I'm responsible for a shard if myShard[shardNr] == true
+}
+
+const Debug = 1
 
 var log_mu sync.Mutex
 
@@ -34,8 +54,8 @@ func (kv *ShardKV) Logf(format string, a ...interface{}) {
 
 	me := kv.me
 
-	fmt.Printf("\x1b[%dm", (me%6)+31)
-	fmt.Printf("S#%d : ", me)
+	fmt.Printf("\x1b[%dm", ((me+int(kv.gid))%9)+31)
+	fmt.Printf("S#%d@%d : ", me, kv.gid)
 	fmt.Printf(format+"\n", a...)
 	fmt.Printf("\x1b[0m")
 }
@@ -53,28 +73,15 @@ type Op struct {
 	Value     string
 	Client    int
 	ClientSeq int
+	Config    shardmaster.Config
 }
+
+// For config OPs, set ClientSeq = Config.Num and Client = 0
 
 type OpReq struct {
 	op        Op
 	replyChan chan string
-}
-
-type ShardKV struct {
-	mu         sync.Mutex
-	l          net.Listener
-	me         int
-	dead       int32 // for testing
-	unreliable int32 // for testing
-	sm         *shardmaster.Clerk
-	px         *paxos.Paxos
-
-	gid int64 // my replica group ID
-
-	lastDummySeq int //Seq of last time we launched a dummy op to fill a hole
-	database     map[string]string
-	clientSeqs   map[int]int
-	opReqChan    chan OpReq
+	errChan   chan Err
 }
 
 func (kv *ShardKV) sequentialApplier() {
@@ -84,14 +91,29 @@ func (kv *ShardKV) sequentialApplier() {
 		case opreq := <-kv.opReqChan:
 			op := opreq.op
 			kv.Logf("Got operation through channel")
+
+			if op.Type != NewConfig && !kv.myShard[key2shard(op.Key)] {
+				opreq.replyChan <- ""
+				opreq.errChan <- ErrWrongGroup
+				kv.Logf("Key from a shard that is not mine! Key: %s ", op.Key)
+
+				//In case we get flooded with wrong keys we need to keep up to date
+				kv.Logf("Ping")
+				seq = kv.ping(seq)
+				break
+			}
+
 			seq = kv.addToPaxos(seq, op)
+
 			kv.Logf("Operation added to paxos log at %d", seq)
 
 			if opreq.op.Type == Get {
 				kv.Logf("Get applied! Feeding value through channel. %d", seq)
 				opreq.replyChan <- kv.database[op.Key]
+				opreq.errChan <- OK
 			} else {
 				opreq.replyChan <- "yey"
+				opreq.errChan <- OK
 			}
 
 		case <-time.After(50 * time.Millisecond):
@@ -102,6 +124,33 @@ func (kv *ShardKV) sequentialApplier() {
 		kv.Logf("Calling Done(%d)", seq-2)
 		kv.px.Done(seq - 1)
 	}
+}
+
+//Handle a new config and freeze(don't return) until we added all new keys
+func (kv *ShardKV) newConfigFreeze(newConfig shardmaster.Config) {
+	kv.Logf("New config! Freeze until everything is sorted")
+
+	newShards := make(map[int]bool)
+
+	for shard, gid := range newConfig.Shards {
+		//TODO: Handle transfers
+		if gid == kv.gid {
+			if !kv.myShard[shard] {
+				newShards[shard] = true
+				kv.myShard[shard] = true
+			}
+		} else {
+			kv.myShard[shard] = false
+		}
+	}
+
+	oldConfig := kv.currentConfig
+
+	for shard, _ := range newShards {
+		kv.fetchShardFromGroup(oldConfig.Shards[shard])
+	}
+
+	kv.currentConfig = newConfig
 }
 
 //Takes the last non-applied seq and returns the new one
@@ -127,7 +176,6 @@ func (kv *ShardKV) ping(seq int) int {
 	}
 	kv.Logf("ERRRRORR: Ping fallthrough, we are dying! Return seq -1 ")
 	return -1
-
 }
 
 func (kv *ShardKV) addToPaxos(seq int, op Op) (retseq int) {
@@ -153,7 +201,7 @@ func (kv *ShardKV) addToPaxos(seq int, op Op) (retseq int) {
 		seq++
 
 		//Did work?
-		if val == op {
+		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
 			kv.Logf("Applied operation in log at seq %d", seq-1)
 			return seq
 		} else {
@@ -161,7 +209,6 @@ func (kv *ShardKV) addToPaxos(seq int, op Op) (retseq int) {
 		}
 	}
 	return -1
-
 }
 func (kv *ShardKV) applyOp(op Op) {
 	//Note, don't update clientseq outside conditionals,
@@ -174,9 +221,67 @@ func (kv *ShardKV) applyOp(op Op) {
 		kv.clientSeqs[op.Client] = op.ClientSeq
 		kv.Logf("Applying append(%s) to database", op.Key)
 		kv.database[op.Key] = kv.database[op.Key] + op.Value
+	} else if op.Type == NewConfig {
+		kv.newConfigFreeze(op.Config)
 	}
 
 	//Do nothing for get
+}
+
+func (kv *ShardKV) fetchShardFromGroup(shard int, gid int64) {
+
+	args := &GetShardArgs{}
+	args.Shard = shard
+	args.ConfigNr = curConfig.Num
+	var reply GetShardReply
+	for {
+		servers, ok := ck.config.Groups[gid]
+
+		if ok {
+			// try each server in the shard's replication group.
+			for _, srv := range servers {
+				ok := call(srv, "ShardKV.GetShard", args, &reply)
+				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					applyShardOps(reply.Ops)
+					return
+				}
+				if ok && (reply.Err == ErrWrongGroup) {
+					break
+				}
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+	return
+
+}
+
+func (kv *ShardKV) applyShardOps(ops []interface{}) {
+	for op := range ops {
+		kv.applyOp(ops.(Op))
+	}
+
+}
+
+func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) error {
+
+	//TODO: Freeze everything when responding? Yes? OMG, can I deadlock?!
+
+	if kv.currentConfig.Num != args.ConfigNr {
+		reply.Err = ErrWrongGroup
+		return nil
+	}
+
+	reply.Ops = make([]interface{}, 0)
+
+	for key, val := range kv.database {
+		if key2shard(key) == args.Shard {
+			reply.Ops = append(reply.Ops, Op{Type: Put, Key: key, Value: val})
+		}
+	}
+
+	return nil
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
@@ -184,13 +289,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 
 	op := Op{Type: Get, Key: args.Key, Client: args.Client, ClientSeq: args.ClientSeq}
 
-	opReq := OpReq{op, make(chan string, 1)}
+	opReq := OpReq{op, make(chan string, 1), make(chan Err, 1)}
 
 	kv.opReqChan <- opReq
 
 	reply.Value = <-opReq.replyChan
-	kv.Logf("Got Get reply, returning to client!")
-	reply.Err = OK
+	reply.Err = <-opReq.errChan
+	kv.Logf("Got Get reply, returning to client! Err: %s", reply.Err)
 	return nil
 }
 
@@ -201,11 +306,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	op := Op{Type: args.Op, Key: args.Key,
 		Value: args.Value, Client: args.Client, ClientSeq: args.ClientSeq}
 
-	opReq := OpReq{op, make(chan string, 1)}
+	opReq := OpReq{op, make(chan string, 1), make(chan Err, 1)}
 
 	kv.opReqChan <- opReq
-	<-opReq.replyChan
-	reply.Err = OK
+
+	reply.Err = <-opReq.errChan
 
 	return nil
 }
@@ -235,7 +340,6 @@ func (kv *ShardKV) waitForPaxos(seq int) (val interface{}, err error) {
 			return
 		}
 	}
-
 }
 
 //
@@ -243,6 +347,18 @@ func (kv *ShardKV) waitForPaxos(seq int) (val interface{}, err error) {
 // if so, re-configure.
 //
 func (kv *ShardKV) tick() {
+	newConfig := kv.sm.Query(-1)
+	if newConfig.Num == kv.currentConfig.Num {
+		return
+	}
+
+	kv.Logf("New configuration!")
+	op := Op{Type: NewConfig, Config: newConfig, Client: 0, ClientSeq: newConfig.Num}
+
+	opReq := OpReq{op, make(chan string, 1), make(chan Err, 1)}
+
+	kv.opReqChan <- opReq
+
 }
 
 // tell the server to shut itself down.
@@ -290,6 +406,7 @@ func StartServer(gid int64, shardmasters []string,
 	kv.database = make(map[string]string)
 	kv.clientSeqs = make(map[int]int)
 	kv.opReqChan = make(chan OpReq)
+	kv.myShard = make(map[int]bool)
 
 	// Your initialization code here.
 	// Don't call Join().

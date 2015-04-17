@@ -21,6 +21,7 @@ const (
 	Get OpType = iota + 1
 	Put
 	Append
+	NewConfig
 )
 
 type Err string
@@ -36,6 +37,16 @@ type PutAppendArgs struct {
 
 type PutAppendReply struct {
 	Err Err
+}
+
+type GetShardArgs struct {
+	ConfigNr int //The current config to make sure we respond in the right point in time
+	Shard    int
+}
+
+type GetShardReply struct {
+	Err Err
+	Ops []interface{}
 }
 
 type GetArgs struct {
