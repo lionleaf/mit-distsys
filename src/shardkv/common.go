@@ -22,6 +22,8 @@ const (
 	Put
 	Append
 	NewConfig
+	ShardSent
+	ShardsReceived
 )
 
 type Err string
@@ -47,6 +49,15 @@ type GetShardArgs struct {
 type GetShardReply struct {
 	Err Err
 	Ops []interface{}
+}
+
+type GotShardArgs struct {
+	ConfigNr int //The current config to make sure we respond in the right point in time
+	Shard    int
+}
+
+type GotShardReply struct {
+	Err Err
 }
 
 type GetArgs struct {
