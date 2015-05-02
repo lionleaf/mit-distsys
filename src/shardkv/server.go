@@ -20,7 +20,7 @@ import "shardmaster"
 //Debugging: TODO: remove
 import _ "net/http/pprof"
 
-const Debug = 1
+const Debug = 0
 
 type ShardKV struct {
 	mu         sync.Mutex
@@ -392,6 +392,32 @@ func (kv *ShardKV) newConfigLeader(newShards map[int]bool, oldShards map[int]boo
 		}
 	}
 }
+func (kv *ShardKV) addToPaxosDuringReconfig(op Op) {
+	for !kv.isdead() {
+		//TODO: Duplicate detection, yes, no?
+
+		kv.px.Start(kv.nextSeq, op)
+		val, err := kv.waitForPaxos(kv.nextSeq)
+
+		if err != nil {
+			kv.Logf("ERRRROROOROROO!!!")
+			continue
+		}
+
+		kv.applyOp(val.(Op))
+
+		kv.nextSeq++
+
+		//Did work?
+		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
+			kv.Logf("Applied operation in log at seq %d", kv.nextSeq-1)
+			return
+		} else {
+			kv.Logf("Somebody else took seq %d before us, applying it and trying again", kv.nextSeq-1)
+		}
+	}
+	return
+}
 
 func (kv *ShardKV) waitForLeaderToGetThemShards(oldShards map[int]bool) {
 	//Called by all servers in a group but the leader upon a new config.
@@ -403,39 +429,10 @@ func (kv *ShardKV) waitForLeaderToGetThemShards(oldShards map[int]bool) {
 
 	receivedShards := false
 
-	addSentShardToPaxos := make(chan Op, 1)
-
 	for !kv.isdead() {
 
 		select {
 
-		case operation := <-addSentShardToPaxos:
-			kv.px.Start(kv.nextSeq, operation)
-			val, _ := kv.waitForPaxos(kv.nextSeq)
-
-			//TODO: Check err
-			if val.(Op).ClientSeq == operation.ClientSeq {
-				kv.Logf("New shards added to paxos")
-				oldShards[operation.Shard] = true
-				if allTrue(oldShards) && receivedShards {
-					kv.Logf("Config successfully applied after I received the last shard")
-					kv.nextSeq++
-					return
-				}
-			} else {
-				kv.Logf("Shoot, not added to paxos!ClientSeq: %d, random: %d", val.(Op).ClientSeq, operation.ClientSeq)
-				time.Sleep(100 * time.Millisecond) //Get some time for paxoswatcher to catch up
-				addSentShardToPaxos <- operation   //Put it back in!
-
-			}
-
-		case gotShard := <-kv.gotShardChan:
-			kv.Logf("Got notification that shard %d was sent!", gotShard)
-			random := rand.Int()
-			newShardsOp := Op{Type: ShardSent, Shard: gotShard, Client: kv.me, ClientSeq: random}
-
-			//Add to paxos:
-			addSentShardToPaxos <- newShardsOp
 		case paxosOp := <-paxosEvent:
 			if paxosOp.Type == ShardSent {
 				//ShardSent - We have succesfully sent a shard.
@@ -476,7 +473,7 @@ func (kv *ShardKV) fetchShardFromGroup(shard int, replyChan chan shardResponse, 
 	gid := kv.oldConfig.Shards[shard]
 	kv.mu.Unlock()
 	var reply GetShardReply
-	for !kv.isdead() {
+	for {
 		kv.mu.Lock()
 		servers, ok := kv.oldConfig.Groups[gid]
 		kv.mu.Unlock()
@@ -518,6 +515,7 @@ func (kv *ShardKV) sendGotShard(shard int, gid int64) {
 	kv.mu.Unlock()
 	var reply GotShardReply
 	for {
+
 		// try each server in the shard's replication group.
 		for _, srv := range servers {
 			kv.Logf("Calling GotShard!")
@@ -598,7 +596,7 @@ func (kv *ShardKV) GotShard(args *GotShardArgs, reply *GotShardReply) error {
 
 	//TODO: Add to paxos log
 
-	kv.gotShardChan <- args.Shard
+	//kv.gotShardChan <- args.Shard
 
 	reply.Err = OK
 	return nil
