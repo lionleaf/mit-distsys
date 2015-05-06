@@ -86,8 +86,12 @@ func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
-	// You'll have to modify Get().
-
+	args := &GetArgs{}
+	args.Key = key
+	//TODO: Fix these.
+	args.ClientSeq = int(nrand())
+	args.Client = int(nrand())
+	var reply GetReply
 	for {
 		shard := key2shard(key)
 
@@ -98,9 +102,6 @@ func (ck *Clerk) Get(key string) string {
 		if ok {
 			// try each server in the shard's replication group.
 			for _, srv := range servers {
-				args := &GetArgs{}
-				args.Key = key
-				var reply GetReply
 				ok := call(srv, "DisKV.Get", args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
@@ -120,11 +121,18 @@ func (ck *Clerk) Get(key string) string {
 }
 
 // send a Put or Append request.
-func (ck *Clerk) PutAppend(key string, value string, op string) {
+func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
 	// You'll have to modify PutAppend().
+	args := &PutAppendArgs{}
+	args.Key = key
+	args.Value = value
+	args.Op = op
+	var reply PutAppendReply
+	args.ClientSeq = int(nrand())
+	args.Client = int(nrand())
 
 	for {
 		shard := key2shard(key)
@@ -136,11 +144,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if ok {
 			// try each server in the shard's replication group.
 			for _, srv := range servers {
-				args := &PutAppendArgs{}
-				args.Key = key
-				args.Value = value
-				args.Op = op
-				var reply PutAppendReply
 				ok := call(srv, "DisKV.PutAppend", args, &reply)
 				if ok && reply.Err == OK {
 					return
@@ -159,8 +162,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, Put)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, Append)
 }
