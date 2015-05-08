@@ -21,7 +21,10 @@ package paxos
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
@@ -168,6 +171,37 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func (px *Paxos) DumpState(dir string) error {
+	fullname := dir + "/paxos"
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	e.Encode(px.maxSeq)
+	e.Encode(px.decided)
+	e.Encode(px.mins)
+	e.Encode(px.globalMin)
+	e.Encode(px.val)
+
+	return ioutil.WriteFile(fullname, w.Bytes(), 0666)
+}
+
+func (px *Paxos) RecoverState(dir string) error {
+	content, err := ioutil.ReadFile(dir + "/paxos")
+
+	r := bytes.NewBuffer(content)
+	d := gob.NewDecoder(r)
+
+	d.Decode(&px.maxSeq)
+	d.Decode(&px.decided)
+	d.Decode(&px.mins)
+	d.Decode(&px.globalMin)
+	d.Decode(&px.val)
+
+	return err
+
 }
 
 //

@@ -1,6 +1,9 @@
 package diskv
 
-import "net"
+import (
+	"bytes"
+	"net"
+)
 import "fmt"
 import (
 	"net/http"
@@ -21,6 +24,7 @@ import "io/ioutil"
 import "strconv"
 
 const Debug = 1
+const DebugFile = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -79,7 +83,23 @@ func (kv *DisKV) Logf(format string, a ...interface{}) {
 
 	me := kv.me
 
-	fmt.Printf("\x1b[%dm", ((me*3+int(kv.gid))%6)+31)
+	fmt.Printf("\x1b[%dm", ((me+int(kv.gid))%6)+31)
+	fmt.Printf("S#%d@%d : ", me, kv.gid)
+	fmt.Printf(format+"\n", a...)
+	fmt.Printf("\x1b[0m")
+}
+
+func (kv *DisKV) Logff(format string, a ...interface{}) {
+	if DebugFile <= 0 {
+		return
+	}
+
+	log_mu.Lock()
+	defer log_mu.Unlock()
+
+	me := kv.me
+
+	fmt.Printf("\x1b[%dm", ((me+int(kv.gid))%6)+31)
 	fmt.Printf("S#%d@%d : ", me, kv.gid)
 	fmt.Printf(format+"\n", a...)
 	fmt.Printf("\x1b[0m")
@@ -94,7 +114,6 @@ type OpReq struct {
 }
 
 func (kv *DisKV) sequentialApplier() {
-	kv.nextSeq = 1
 	for !kv.isdead() {
 		select {
 		case opreq := <-kv.opReqChan:
@@ -114,7 +133,7 @@ func (kv *DisKV) sequentialApplier() {
 
 			kv.addToPaxos(op)
 
-			kv.Logf("Operation added to paxos log at %d", kv.nextSeq)
+			kv.Logf("Operation added to paxos log at %d", kv.nextSeq-1)
 
 			if opreq.op.Type == Get {
 				kv.Logf("Get applied! Feeding value through channel. %d", kv.nextSeq)
@@ -143,7 +162,6 @@ func (kv *DisKV) ping() {
 
 		if fate == paxos.Decided {
 			kv.nextSeq++
-			kv.dumpState()
 			kv.applyOp(val.(Op))
 			continue
 		}
@@ -175,12 +193,11 @@ func (kv *DisKV) addToPaxos(op Op) {
 		val, err := kv.waitForPaxos(kv.nextSeq)
 
 		if err != nil {
-			kv.Logf("ERRRROROOROROO!!!")
+			kv.Logf("ERRRROROOROROO!!! ", err)
 			continue
 		}
 
 		kv.nextSeq++
-		kv.dumpState()
 		kv.applyOp(val.(Op))
 
 		//Did work?
@@ -211,6 +228,21 @@ func (kv *DisKV) applyOp(op Op) {
 	}
 
 	//Do nothing for get
+}
+
+//Reapply a config after a crash recovery
+func (kv *DisKV) reapplyConfig(configNum int) {
+	kv.Logff("Reapplying config %d", configNum)
+	config := kv.sm.Query(configNum)
+	for shard, gid := range config.Shards {
+		if gid == kv.gid {
+			kv.myShard[shard] = true
+		} else {
+			kv.myShard[shard] = false
+		}
+	}
+
+	kv.currentConfig = config
 }
 
 //Handle a new config and freeze(don't return) until we added all new keys
@@ -317,7 +349,6 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 				if allTrue(oldShards) {
 					kv.Logf("Config successfully applied after I received the last shard")
 					kv.nextSeq++
-					kv.dumpState()
 					close(stopChan)
 					close(stopPaxosWatcher)
 					return
@@ -341,7 +372,6 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 				if allTrue(oldShards) && opAddedToPaxos {
 					kv.Logf("Config successfully applied after I received the last shard")
 					kv.nextSeq++
-					kv.dumpState()
 				}
 			} else {
 				kv.Logf("Shoot, not added to paxos!ClientSeq: %d, random: %d", val.(Op).ClientSeq, operation.ClientSeq)
@@ -415,7 +445,6 @@ func (kv *DisKV) addToPaxosDuringReconfig(op Op) {
 
 		//TODO: What happens if crash between these two lines?
 		kv.nextSeq++
-		kv.dumpState()
 
 		//Did work?
 		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
@@ -482,7 +511,7 @@ func (kv *DisKV) fetchShardFromGroup(shard int, replyChan chan shardResponse, st
 	gid := kv.oldConfig.Shards[shard]
 	kv.mu.Unlock()
 	var reply GetShardReply
-	for {
+	for !kv.isdead() {
 		kv.mu.Lock()
 		servers, ok := kv.oldConfig.Groups[gid]
 		kv.mu.Unlock()
@@ -522,7 +551,7 @@ func (kv *DisKV) sendGotShard(shard int, gid int64) {
 	servers := kv.oldConfig.Groups[gid]
 	kv.mu.Unlock()
 	var reply GotShardReply
-	for {
+	for !kv.isdead() {
 
 		// try each server in the shard's replication group.
 		for _, srv := range servers {
@@ -569,7 +598,6 @@ func (kv *DisKV) paxosWatcher(opChan chan Op, stop chan bool) {
 				}
 				opChan <- val.(Op)
 				kv.nextSeq++
-				kv.dumpState()
 			}
 		}
 	}
@@ -612,25 +640,72 @@ func (kv *DisKV) GotShard(args *GotShardArgs, reply *GotShardReply) error {
 }
 
 func (kv *DisKV) writeKeyToDisk(key string) {
-	kv.Logf("Dumping key %s to disk!", key)
+	kv.Logff("Dumping key %s to disk!", key)
+
+	kv.dumpState()
 	kv.filePut(key2shard(key), kv.encodeKey(key), kv.database[key])
+	if e := kv.commitDisk(); e != nil {
+		kv.Logff("Commit returned error: %s", e)
+	}
+
+	//Each time we write to disk, let's make sure the state is consistent
+	//TODO: What happens if it crashes right here?
+}
+
+func (kv *DisKV) commitDisk() error {
+	if e := os.Rename(kv.dir+"/temp/state", kv.dir+"/state"); e != nil {
+		return e
+	}
+	if e := os.Rename(kv.dir+"/temp/paxos", kv.dir+"/paxos"); e != nil {
+		return e
+	}
+
+	//TODO: Remove a mutex
+	return nil
 }
 
 /**
  * Dumps important state to disk
 **/
 func (kv *DisKV) dumpState() error {
-	fullname := kv.stateDir() + "/seq"
-	tempname := kv.stateDir() + "/temp"
-	content := string(kv.nextSeq)
 
-	if err := ioutil.WriteFile(tempname, []byte(content), 0666); err != nil {
+	kv.Logff("Dumping state to file %s", kv.tempDir()+"state")
+	if err := kv.px.DumpState(kv.tempDir()); err != nil {
 		return err
 	}
-	if err := os.Rename(tempname, fullname); err != nil {
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	e.Encode(kv.nextSeq)
+	e.Encode(kv.nextConfigNum)
+	e.Encode(kv.clientSeqs)
+
+	if err := ioutil.WriteFile(kv.tempDir()+"state", w.Bytes(), 0666); err != nil {
 		return err
 	}
+
+	//TODO: Wrte to temp folder and commit here.
+
 	return nil
+
+}
+
+func (kv *DisKV) recoverState() error {
+	kv.Logff("RecoverState()")
+	content, err := ioutil.ReadFile(kv.dir + "/state")
+	kv.Logff("File read, err = %s", err)
+
+	r := bytes.NewBuffer(content)
+	d := gob.NewDecoder(r)
+
+	d.Decode(&kv.nextSeq)
+	kv.Logff("nextSeq = %d", kv.nextSeq)
+	d.Decode(&kv.nextConfigNum)
+	kv.Logff("nextConfigNum = %d", kv.nextConfigNum)
+	d.Decode(&kv.clientSeqs)
+
+	return err
 }
 
 //
@@ -656,6 +731,30 @@ func (kv *DisKV) shardDir(shard int) string {
 //Directory to hold various important state
 func (kv *DisKV) stateDir() string {
 	d := kv.dir + "/state/"
+	// create directory if needed.
+	_, err := os.Stat(d)
+	if err != nil {
+		if err := os.Mkdir(d, 0777); err != nil {
+			log.Fatalf("Mkdir(%v): %v", d, err)
+		}
+	}
+	return d
+}
+
+func (kv *DisKV) tempShardDir(shard int) string {
+	d := kv.tempDir() + "shard-" + strconv.Itoa(shard) + "/"
+	// create directory if needed.
+	_, err := os.Stat(d)
+	if err != nil {
+		if err := os.Mkdir(d, 0777); err != nil {
+			log.Fatalf("Mkdir(%v): %v", d, err)
+		}
+	}
+	return d
+}
+
+func (kv *DisKV) tempDir() string {
+	d := kv.dir + "/temp/"
 	// create directory if needed.
 	_, err := os.Stat(d)
 	if err != nil {
@@ -737,27 +836,20 @@ func (kv *DisKV) fileReplaceShard(shard int, m map[string]string) {
 }
 
 func (kv *DisKV) recoverFromDisk() {
+	kv.recoverState()
+	kv.reapplyConfig(kv.nextConfigNum - 1)
+	kv.px.RecoverState(kv.dir)
 	kv.recoverDatabaseFromDisk()
-	kv.recoverSeq()
-}
-
-func (kv *DisKV) recoverSeq() {
-	fullname := kv.stateDir() + "seq"
-	content, _ := ioutil.ReadFile(fullname)
-
-	//TODO: Convert more elegantly
-	recSeq, _ := strconv.ParseInt(string(content), 10, 32)
-	kv.nextSeq = int(recSeq)
-
 }
 
 func (kv *DisKV) recoverDatabaseFromDisk() {
-	//TODO: FIXME!!! Hardcoded for debugging
-	n_shards := 9
+	n_shards := shardmaster.NShards
 	for i := 0; i < n_shards; i++ {
 		shard := kv.fileReadShard(i)
 		for k, v := range shard {
-			kv.database[k] = v
+			key, _ := kv.decodeKey(k)
+			kv.Logff("Read %s = %s from disk", key, v)
+			kv.database[key] = v
 		}
 	}
 }
@@ -795,7 +887,7 @@ func (kv *DisKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 func (kv *DisKV) waitForPaxos(seq int) (val interface{}, err error) {
 	var status paxos.Fate
 	to := 10 * time.Millisecond
-	for {
+	for !kv.isdead() {
 		status, val = kv.px.Status(seq)
 		if status == paxos.Decided {
 			err = nil
@@ -803,8 +895,8 @@ func (kv *DisKV) waitForPaxos(seq int) (val interface{}, err error) {
 		}
 
 		if status == paxos.Forgotten || kv.isdead() {
-			err = fmt.Errorf("We are dead or waiting for something forgotten. Server shutting down?")
-			kv.Logf("We are dead or waiting for something forgotten. Server shutting down?")
+			err = fmt.Errorf("We are dead or waiting for something forgotten. Seq: %d", seq)
+			kv.Logf("We are dead or waiting for something forgotten. Seq: %d", seq)
 			return
 		}
 
@@ -817,6 +909,7 @@ func (kv *DisKV) waitForPaxos(seq int) (val interface{}, err error) {
 			return
 		}
 	}
+	return
 }
 
 //
@@ -826,9 +919,11 @@ func (kv *DisKV) waitForPaxos(seq int) (val interface{}, err error) {
 func (kv *DisKV) tick() {
 	kv.Logf("Tick()")
 	newConfig := kv.sm.Query(-1)
-	if newConfig.Num == -1 || newConfig.Num == kv.currentConfig.Num {
+	if newConfig.Num == -1 || newConfig.Num == kv.nextConfigNum-1 {
 		return
 	}
+
+	kv.Logf("Tick(): Query for config nr %d!. Newest is %d", kv.nextConfigNum, newConfig.Num)
 
 	newConfig = kv.sm.Query(kv.nextConfigNum)
 
@@ -905,6 +1000,7 @@ func StartServer(gid int64, shardmasters []string,
 	kv.currentConfig = shardmaster.Config{Num: -1}
 
 	kv.nextConfigNum = 1
+	kv.nextSeq = 1
 
 	// log.SetOutput(ioutil.Discard)
 
@@ -925,15 +1021,18 @@ func StartServer(gid int64, shardmasters []string,
 	kv.l = l
 
 	if restart {
+		kv.Logf("Restart detected, recovering from disk!")
 		kv.recoverFromDisk()
+		kv.Logf("Recovered from disk. Next seq: %d", kv.nextSeq)
 	}
-
-	go kv.sequentialApplier()
 
 	//Debugging: TODO: Remove
 	go func() {
-		log.Println(http.ListenAndServe("localhost:6262", nil))
+		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
+
+	kv.Logf("Starting sequential applier")
+	go kv.sequentialApplier()
 
 	// please do not change any of the following code,
 	// or do anything to subvert it.
