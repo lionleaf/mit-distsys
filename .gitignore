@@ -1,3 +1,6 @@
 api.key
 *-handin.tar.gz
 *.swp
+*.err
+*.log
+*.sh
