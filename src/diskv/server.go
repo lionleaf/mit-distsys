@@ -69,6 +69,9 @@ type DisKV struct {
 	nextConfigNum int
 
 	gotShardChan chan int
+
+	lastKeyPath     string
+	lastKeyTempPath string
 }
 
 var log_mu sync.Mutex
@@ -653,6 +656,27 @@ func (kv *DisKV) writeKeyToDisk(key string) {
 }
 
 func (kv *DisKV) commitDisk() error {
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	e.Encode(kv.lastKeyTempPath)
+	e.Encode(kv.lastKeyPath)
+
+	//Atomically write token file so we can detect crash mid-commit
+	if err := ioutil.WriteFile(kv.tempDir()+"temp-token", w.Bytes(), 0666); err != nil {
+		return err
+	}
+
+	if e := os.Rename(kv.tempDir()+"temp-token", kv.tempDir()+"token"); e != nil {
+		return e
+	}
+
+	//Commit the files
+
+	if e := os.Rename(kv.lastKeyTempPath, kv.lastKeyPath); e != nil {
+		return e
+	}
 	if e := os.Rename(kv.dir+"/temp/state", kv.dir+"/state"); e != nil {
 		return e
 	}
@@ -660,7 +684,11 @@ func (kv *DisKV) commitDisk() error {
 		return e
 	}
 
-	//TODO: Remove a mutex
+	//Remove token
+	if e := os.Remove(kv.tempDir() + "token"); e != nil {
+		return e
+	}
+
 	return nil
 }
 
@@ -684,8 +712,6 @@ func (kv *DisKV) dumpState() error {
 	if err := ioutil.WriteFile(kv.tempDir()+"state", w.Bytes(), 0666); err != nil {
 		return err
 	}
-
-	//TODO: Wrte to temp folder and commit here.
 
 	return nil
 
@@ -741,7 +767,7 @@ func (kv *DisKV) stateDir() string {
 	return d
 }
 
-func (kv *DisKV) tempShardDir(shard int) string {
+func (kv *DisKV) shardTempDir(shard int) string {
 	d := kv.tempDir() + "shard-" + strconv.Itoa(shard) + "/"
 	// create directory if needed.
 	_, err := os.Stat(d)
@@ -790,15 +816,9 @@ func (kv *DisKV) fileGet(shard int, key string) (string, error) {
 // uses rename() to make the replacement atomic with
 // respect to crashes.
 func (kv *DisKV) filePut(shard int, key string, content string) error {
-	fullname := kv.shardDir(shard) + "/key-" + kv.encodeKey(key)
-	tempname := kv.shardDir(shard) + "/temp-" + kv.encodeKey(key)
-	if err := ioutil.WriteFile(tempname, []byte(content), 0666); err != nil {
-		return err
-	}
-	if err := os.Rename(tempname, fullname); err != nil {
-		return err
-	}
-	return nil
+	kv.lastKeyTempPath = kv.shardTempDir(shard) + "/key-" + kv.encodeKey(key)
+	kv.lastKeyPath = kv.shardDir(shard) + "/key-" + kv.encodeKey(key)
+	return ioutil.WriteFile(kv.lastKeyTempPath, []byte(content), 0666)
 }
 
 // return content of every key file in a given shard.
@@ -836,10 +856,38 @@ func (kv *DisKV) fileReplaceShard(shard int, m map[string]string) {
 }
 
 func (kv *DisKV) recoverFromDisk() {
+	kv.fixAbortedCommits()
+
 	kv.recoverState()
 	kv.reapplyConfig(kv.nextConfigNum - 1)
 	kv.px.RecoverState(kv.dir)
 	kv.recoverDatabaseFromDisk()
+}
+func (kv *DisKV) fixAbortedCommits() {
+	_, err := os.Stat(kv.tempDir() + "token")
+	if err != nil {
+		//No aborted commit
+		return
+	}
+
+	kv.Logf("Aborted commit detected. Fixing")
+
+	content, err := ioutil.ReadFile(kv.tempDir() + "token")
+
+	if err != nil {
+		kv.Logf("Error reading commit token", err)
+	}
+
+	r := bytes.NewBuffer(content)
+	d := gob.NewDecoder(r)
+	d.Decode(kv.lastKeyTempPath)
+	d.Decode(kv.lastKeyPath)
+
+	//Do the commit over!
+	kv.commitDisk()
+
+	//Create token file so we can detect crash mid-commit
+	//Aborted commit detected
 }
 
 func (kv *DisKV) recoverDatabaseFromDisk() {
