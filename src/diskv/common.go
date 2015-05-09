@@ -19,6 +19,7 @@ type OpType int
 
 const (
 	Get OpType = iota + 1
+	GetDatabase
 	Put
 	Append
 	NewConfig
@@ -48,6 +49,13 @@ type GetShardArgs struct {
 type GetShardReply struct {
 	Err Err
 	Ops []interface{}
+}
+type GetDatabaseArgs struct {
+}
+
+type GetDatabaseReply struct {
+	Err    Err
+	DBblob string
 }
 
 type GotShardArgs struct {

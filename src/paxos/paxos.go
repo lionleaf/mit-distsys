@@ -82,6 +82,9 @@ type Paxos struct {
 
 	//Map of the values
 	val map[int]interface{}
+
+	nonvoter   bool
+	firstStart int //First start seen after a restart. When this completes, we can remove nonvoter state
 }
 
 type PrepareArgs struct {
@@ -544,6 +547,10 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	//	px.Logf("Decided(%d)\n", args.Seq)
 
 	px.lock.Lock()
+	if px.firstStart == args.Seq {
+		px.nonvoter = false
+		fmt.Printf("Paxos no longer nonvoter! \n")
+	}
 	if args.Seq > px.maxSeq {
 		px.maxSeq = args.Seq
 	}
@@ -586,6 +593,15 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 	ac.lock.Lock()
 	defer ac.lock.Unlock()
 
+	if px.nonvoter {
+		if px.firstStart < 0 {
+			px.firstStart = args.Seq
+			fmt.Printf("First prepare after restart: %d \n", args.Seq)
+		}
+		fmt.Printf("Nonvoter, not responding to prepare Seq: %d  firstSTart %d \n", args.Seq, px.firstStart)
+		return nil
+	}
+
 	if args.N > ac.n_prep {
 		ac.n_prep = args.N
 
@@ -627,6 +643,11 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 	ac.lock.Lock()
 	defer ac.lock.Unlock()
 
+	if px.nonvoter {
+		ret.OK = false
+		fmt.Printf("Nonvoter, not responding to accept. Seq: %d  firstSTart %d \n", args.Seq, px.firstStart)
+		return nil
+	}
 	if n >= ac.n_prep {
 		px.Logf("%d accept_ok(N: %d  N_prep: %d)! \n", args.Seq, n, ac.n_prep)
 		ac.n_prep = n
@@ -673,6 +694,11 @@ func (px *Paxos) isunreliable() bool {
 	return atomic.LoadInt32(&px.unreliable) != 0
 }
 
+func (px *Paxos) BecomeNonvoter() {
+	px.nonvoter = true
+	px.firstStart = -1
+}
+
 //
 // the application wants to create a paxos peer.
 // the ports of all the paxos peers (including this one)
@@ -692,6 +718,9 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.mins = make([]int, px.n_peers)
 
 	px.globalMin = -1
+
+	px.nonvoter = false
+	px.firstStart = -1
 
 	if rpcs != nil {
 		// caller will create socket &c

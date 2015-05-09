@@ -22,6 +22,7 @@ import "math/rand"
 import "shardmaster"
 import "io/ioutil"
 import "strconv"
+import _ "net/http/pprof"
 
 const Debug = 1
 const DebugFile = 1
@@ -72,6 +73,8 @@ type DisKV struct {
 
 	lastKeyPath     string
 	lastKeyTempPath string
+
+	paxosFastForward chan bool
 }
 
 var log_mu sync.Mutex
@@ -118,10 +121,30 @@ type OpReq struct {
 
 func (kv *DisKV) sequentialApplier() {
 	for !kv.isdead() {
+
 		select {
+		case <-kv.paxosFastForward:
+			dummyOp := Op{Type: Get}
+			kv.addToPaxos(dummyOp)
+
 		case opreq := <-kv.opReqChan:
 			op := opreq.op
 			kv.Logf("Got operation through channel")
+
+			if op.Type == GetDatabase {
+
+				w := new(bytes.Buffer)
+				e := gob.NewEncoder(w)
+
+				e.Encode(kv.database)
+				e.Encode(kv.nextSeq)
+				e.Encode(kv.nextConfigNum)
+				//e.Encode(kv.clientSeqs)
+
+				opreq.replyChan <- string(w.Bytes())
+				opreq.errChan <- OK
+				break
+			}
 
 			if op.Type != NewConfig && !kv.myShard[key2shard(op.Key)] {
 				opreq.replyChan <- ""
@@ -856,6 +879,13 @@ func (kv *DisKV) fileReplaceShard(shard int, m map[string]string) {
 }
 
 func (kv *DisKV) recoverFromDisk() {
+	_, e := os.Stat(kv.dir + "/del")
+	if e != nil {
+		kv.Logf("We lost the disk!!", e)
+		kv.recoverAfterLostDisk()
+		return
+	}
+
 	kv.fixAbortedCommits()
 
 	kv.recoverState()
@@ -901,6 +931,100 @@ func (kv *DisKV) recoverDatabaseFromDisk() {
 		}
 	}
 }
+
+func (kv *DisKV) recoverAfterLostDisk() {
+	kv.px.BecomeNonvoter()
+	kv.Logf("Paxos became non-voting!")
+	//Get last config
+	kv.currentConfig = kv.sm.Query(-1)
+	kv.Logf("Got a config!")
+
+	//Set paxos to non-voting
+
+	//Get database from another server (I don't think it's possible to get a stale database becuase how paxos Done() works)
+
+	kv.recoverDatabaseFromServer()
+
+	//Set correct seq according to database
+	//Set correct config according to the database we got
+
+	kv.reapplyConfig(kv.nextConfigNum - 1)
+
+	kv.paxosFastForward <- true
+
+}
+
+func (kv *DisKV) recoverDatabaseFromServer() {
+	kv.mu.Lock()
+	servers, ok := kv.currentConfig.Groups[kv.gid]
+	kv.mu.Unlock()
+	if !ok {
+		kv.Logf("recoverDatabaseFromServer NOT OK!! ", servers, kv.currentConfig)
+		return
+	}
+
+	kv.Logf("Trying to get a database from other servers. Serverlist length %d", len(servers))
+	success := false
+	for !success {
+		for i, srv := range servers {
+			if i == kv.me {
+				continue
+			}
+			kv.Logf("Calling getdase from %s!", srv)
+
+			ok_chan := make(chan bool, 1)
+			args := &GetDatabaseArgs{}
+			var reply GetDatabaseReply
+
+			go func() {
+				ok_chan <- call(srv, "DisKV.GetDatabase", args, &reply)
+				kv.Logf("Goroutine calling GetDatabase returned")
+			}()
+
+			select {
+			case ok := <-ok_chan:
+				if !ok {
+					kv.Logf("GetDatabase call failed", ok)
+					continue
+				}
+			case <-time.After(1 * time.Second):
+				kv.Logf("GetDatabase call timeout")
+				continue
+
+			}
+
+			r := bytes.NewBuffer([]byte(reply.DBblob))
+			d := gob.NewDecoder(r)
+
+			d.Decode(&kv.database)
+			d.Decode(&kv.nextSeq)
+			kv.Logff("nextSeq = %d", kv.nextSeq)
+			d.Decode(&kv.nextConfigNum)
+			kv.Logff("nextConfigNum = %d", kv.nextConfigNum)
+			//d.Decode(&kv.clientSeqs)
+			success = true
+			break
+
+		}
+	}
+
+}
+
+func (kv *DisKV) GetDatabase(args *GetDatabaseArgs, reply *GetDatabaseReply) error {
+	kv.Logf("Server GetDatabase()!")
+
+	op := Op{Type: GetDatabase}
+
+	opReq := OpReq{op, make(chan string, 1), make(chan Err, 1)}
+
+	kv.opReqChan <- opReq
+
+	reply.DBblob = <-opReq.replyChan
+	reply.Err = <-opReq.errChan
+	kv.Logf("Got GetDatabase reply, returning to client! Err: %s", reply.Err)
+	return nil
+}
+
 func (kv *DisKV) Get(args *GetArgs, reply *GetReply) error {
 	kv.Logf("Server Get(%s)! Shard: %d", args.Key, key2shard(args.Key))
 
@@ -1010,6 +1134,15 @@ func (kv *DisKV) isunreliable() bool {
 	return atomic.LoadInt32(&kv.unreliable) != 0
 }
 
+func (kv *DisKV) writeInitialState() {
+	kv.Logf("Writing initial state file!")
+
+	if err := ioutil.WriteFile(kv.dir+"/del", []byte("hihi"), 0666); err != nil {
+		kv.Logf("Error writing initial state", err)
+	}
+
+}
+
 //
 // Start a shardkv server.
 // gid is the ID of the server's replica group.
@@ -1035,6 +1168,7 @@ func StartServer(gid int64, shardmasters []string,
 	kv.dir = dir
 
 	kv.Logf("Storage directory: %s ", dir)
+	kv.Logf("Me: %s ", me)
 
 	// Your initialization code here.
 	// Don't call Join().
@@ -1042,6 +1176,7 @@ func StartServer(gid int64, shardmasters []string,
 	kv.clientSeqs = make(map[int]int)
 	kv.opReqChan = make(chan OpReq)
 	kv.gotShardChan = make(chan int)
+	kv.paxosFastForward = make(chan bool, 1)
 	kv.myShard = make(map[int]bool)
 
 	kv.oldConfig = shardmaster.Config{Num: -1}
@@ -1080,6 +1215,9 @@ func StartServer(gid int64, shardmasters []string,
 	}()
 
 	kv.Logf("Starting sequential applier")
+
+	kv.writeInitialState()
+
 	go kv.sequentialApplier()
 
 	// please do not change any of the following code,
