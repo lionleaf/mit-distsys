@@ -47,8 +47,9 @@ type GetShardArgs struct {
 }
 
 type GetShardReply struct {
-	Err Err
-	Ops []interface{}
+	Err        Err
+	Ops        []interface{}
+	ClientSeqs map[int]int
 }
 type GetDatabaseArgs struct {
 }

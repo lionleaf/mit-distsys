@@ -9,10 +9,11 @@ import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
-	mu     sync.Mutex // one RPC at a time
-	sm     *shardmaster.Clerk
-	config shardmaster.Config
-	// You'll have to modify Clerk.
+	mu      sync.Mutex // one RPC at a time
+	sm      *shardmaster.Clerk
+	config  shardmaster.Config
+	me      int
+	nextSeq int
 }
 
 func nrand() int64 {
@@ -25,7 +26,8 @@ func nrand() int64 {
 func MakeClerk(shardmasters []string) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(shardmasters)
-	// You'll have to modify MakeClerk.
+	ck.me = int(nrand())
+	ck.nextSeq = 1
 	return ck
 }
 
@@ -88,9 +90,11 @@ func (ck *Clerk) Get(key string) string {
 
 	args := &GetArgs{}
 	args.Key = key
-	//TODO: Fix these.
-	args.ClientSeq = int(nrand())
-	args.Client = int(nrand())
+
+	args.ClientSeq = ck.nextSeq
+	ck.nextSeq++
+	args.Client = ck.me
+
 	var reply GetReply
 	for {
 		shard := key2shard(key)
@@ -131,8 +135,9 @@ func (ck *Clerk) PutAppend(key string, value string, op OpType) {
 	args.Value = value
 	args.Op = op
 	var reply PutAppendReply
-	args.ClientSeq = int(nrand())
-	args.Client = int(nrand())
+	args.ClientSeq = ck.nextSeq
+	ck.nextSeq++
+	args.Client = ck.me
 
 	for {
 		shard := key2shard(key)

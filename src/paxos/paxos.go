@@ -83,8 +83,8 @@ type Paxos struct {
 	//Map of the values
 	val map[int]interface{}
 
-	nonvoter   bool
-	firstStart int //First start seen after a restart. When this completes, we can remove nonvoter state
+	nonvoter      bool
+	observedPreps map[int]int
 }
 
 type PrepareArgs struct {
@@ -111,6 +111,7 @@ type PrepAcceptRet struct {
 }
 
 type DecidedArgs struct {
+	N      int
 	Value  interface{}
 	Seq    int
 	Mins   []int
@@ -177,6 +178,9 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 }
 
 func (px *Paxos) DumpState(dir string) error {
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
 	fullname := dir + "/paxos"
 
 	w := new(bytes.Buffer)
@@ -192,6 +196,8 @@ func (px *Paxos) DumpState(dir string) error {
 }
 
 func (px *Paxos) RecoverState(dir string) error {
+	px.mu.Lock()
+	defer px.mu.Unlock()
 	content, err := ioutil.ReadFile(dir + "/paxos")
 
 	r := bytes.NewBuffer(content)
@@ -483,7 +489,9 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 		px.lock.Lock()
 		n := rndAbove(px.n_highest[Seq])
 
-		prepArgs := PrepareArgs{n, Seq, px.mins, px.me}
+		mins_copy := make([]int, len(px.mins))
+		copy(mins_copy, px.mins)
+		prepArgs := PrepareArgs{n, Seq, mins_copy, px.me}
 		px.lock.Unlock()
 
 		prepMajority, highest_n, highest_v := px.attemptRPCMajority("Paxos.Prepare", prepArgs)
@@ -514,10 +522,13 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 				px.Logf("%d Got majority accept! \n", Seq)
 
 				px.lock.Lock()
+				mins_copy := make([]int, len(px.mins))
+				copy(mins_copy, px.mins)
 				decidedArgs := DecidedArgs{
+					N:      n,
 					Value:  highest_v,
 					Seq:    Seq,
-					Mins:   px.mins,
+					Mins:   mins_copy,
 					Peer_n: px.me}
 				px.lock.Unlock()
 
@@ -559,7 +570,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	//	px.Logf("Decided(%d)\n", args.Seq)
 
 	px.lock.Lock()
-	if px.firstStart == args.Seq {
+	if px.observedPreps[args.Seq] == args.N {
 		px.nonvoter = false
 		fmt.Printf("Paxos no longer nonvoter! \n")
 	}
@@ -574,7 +585,9 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	}
 
 	ret.OK = true
-	ret.Mins = px.mins
+	mins_copy := make([]int, len(px.mins))
+	copy(mins_copy, px.mins)
+	ret.Mins = mins_copy
 	ret.Peer_n = px.me
 
 	px.lock.Unlock()
@@ -588,7 +601,9 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 
 	//For memory management
 	px.lock.Lock()
-	ret.Mins = px.mins
+	mins_copy := make([]int, len(px.mins))
+	copy(mins_copy, px.mins)
+	ret.Mins = mins_copy
 	ret.Peer_n = px.me
 
 	if args.Seq > px.maxSeq {
@@ -606,11 +621,8 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 	defer ac.lock.Unlock()
 
 	if px.nonvoter {
-		if px.firstStart < 0 {
-			px.firstStart = args.Seq
-			fmt.Printf("First prepare after restart: %d \n", args.Seq)
-		}
-		fmt.Printf("Nonvoter, not responding to prepare Seq: %d  firstSTart %d \n", args.Seq, px.firstStart)
+		px.observedPreps[args.Seq] = args.N
+		fmt.Printf("Nonvoter, not responding to prepare Seq: %d N: \n", args.Seq, args.N)
 		return nil
 	}
 
@@ -657,7 +669,7 @@ func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 
 	if px.nonvoter {
 		ret.OK = false
-		fmt.Printf("Nonvoter, not responding to accept. Seq: %d  firstSTart %d \n", args.Seq, px.firstStart)
+		fmt.Printf("Nonvoter, not responding to accept. Seq: %d  \n", args.Seq)
 		return nil
 	}
 	if n >= ac.n_prep {
@@ -708,7 +720,6 @@ func (px *Paxos) isunreliable() bool {
 
 func (px *Paxos) BecomeNonvoter() {
 	px.nonvoter = true
-	px.firstStart = -1
 }
 
 //
@@ -732,7 +743,7 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.globalMin = -1
 
 	px.nonvoter = false
-	px.firstStart = -1
+	px.observedPreps = make(map[int]int)
 
 	if rpcs != nil {
 		// caller will create socket &c

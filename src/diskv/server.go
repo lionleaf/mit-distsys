@@ -25,7 +25,7 @@ import "strconv"
 import _ "net/http/pprof"
 
 const Debug = 0
-const DebugFile = 0
+const DebugFile = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -35,14 +35,15 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	Type      OpType
-	Key       string
-	Value     string
-	Shard     int
-	ShardOps  []interface{}
-	Client    int
-	ClientSeq int
-	Config    shardmaster.Config
+	Type       OpType
+	Key        string
+	Value      string
+	Shard      int
+	ShardOps   []interface{}
+	Client     int
+	ClientSeqs map[int]int
+	ClientSeq  int
+	Config     shardmaster.Config
 }
 
 type DisKV struct {
@@ -140,7 +141,7 @@ func (kv *DisKV) sequentialApplier() {
 				e.Encode(kv.database)
 				e.Encode(kv.nextSeq)
 				e.Encode(kv.nextConfigNum)
-				//e.Encode(kv.clientSeqs)
+				e.Encode(kv.clientSeqs)
 
 				opreq.replyChan <- string(w.Bytes())
 				opreq.errChan <- OK
@@ -171,7 +172,7 @@ func (kv *DisKV) sequentialApplier() {
 				opreq.errChan <- OK
 			}
 
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 			kv.Logf("Ping")
 			kv.ping()
 		}
@@ -198,7 +199,6 @@ func (kv *DisKV) ping() {
 		if fate == paxos.Decided {
 			kv.nextSeq++
 			kv.applyOp(val.(Op))
-			kv.px.Done(kv.nextSeq - 1)
 			continue
 		}
 
@@ -207,7 +207,6 @@ func (kv *DisKV) ping() {
 			kv.px.Start(kv.nextSeq, dummyOp)
 			kv.waitForPaxos(kv.nextSeq)
 			kv.lastDummySeq = kv.nextSeq
-			kv.px.Done(kv.nextSeq - 1)
 		} else {
 			return
 		}
@@ -223,14 +222,14 @@ func (kv *DisKV) addToPaxos(op Op) {
 
 		if (op.Type == Put || op.Type == Append) && op.ClientSeq <= kv.clientSeqs[op.Client] {
 			//Duplicate! Ignore it and return   (Don't mind dup gets)
-			kv.Logf("Ignoring duplicate Put/Append")
+			kv.Logf("Ignoring duplicate Put/Append clientSeq %d, prev seen client seq; %d", op.ClientSeq, kv.clientSeqs[op.Client])
 			return
 		}
 
 		kv.px.Start(kv.nextSeq, op)
 		val, err := kv.waitForPaxos(kv.nextSeq)
 
-		if err != nil {
+		if err != nil || val == nil {
 			kv.Logf("ERRRROROOROROO!!! ", err)
 			continue
 		}
@@ -334,8 +333,9 @@ func (kv *DisKV) applyNewConfig(newConfig shardmaster.Config, leader bool) {
 }
 
 type shardResponse struct {
-	Shard    []interface{} //Slice of Put Ops that can be directly applied to update this shard
-	ShardNum int
+	Shard      []interface{} //Slice of Put Ops that can be directly applied to update this shard
+	ClientSeqs map[int]int
+	ShardNum   int
 }
 
 func allTrue(testmap map[int]bool) bool {
@@ -345,6 +345,17 @@ func allTrue(testmap map[int]bool) bool {
 		}
 	}
 	return true
+}
+
+func max(a map[int]int, b map[int]int) (r map[int]int) {
+	r = make(map[int]int)
+	for k, v := range a {
+		r[k] = v
+		if b[k] > v {
+			r[k] = b[k]
+		}
+	}
+	return
 }
 
 func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool) {
@@ -366,6 +377,7 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 	go kv.paxosWatcher(paxosEvent, stopPaxosWatcher)
 
 	var newShardOps []interface{}
+	var newClientSeqs map[int]int
 
 	allShardsOp := make(chan Op, 1)
 
@@ -430,11 +442,12 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 			kv.Logf("Got a shard response!! :D")
 			newShards[response.ShardNum] = true
 			newShardOps = append(newShardOps, response.Shard...)
+			newClientSeqs = max(newClientSeqs, response.ClientSeqs)
 
 			if allTrue(newShards) {
 				kv.Logf("Got all them shards, adding to paxos")
 				random := rand.Int()
-				newShardsOp := Op{Type: ShardsReceived, ShardOps: newShardOps, Client: kv.me, ClientSeq: random}
+				newShardsOp := Op{Type: ShardsReceived, ShardOps: newShardOps, ClientSeqs: newClientSeqs, Client: kv.me, ClientSeq: random}
 
 				//Add to paxos:
 				allShardsOp <- newShardsOp
@@ -564,7 +577,7 @@ func (kv *DisKV) fetchShardFromGroup(shard int, replyChan chan shardResponse, st
 			kv.Logf("GetShard returned. Ok: %b!", ok)
 			if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 				kv.Logf("Got shard %d from gid %d!", shard, gid)
-				replyChan <- shardResponse{reply.Ops, shard}
+				replyChan <- shardResponse{reply.Ops, reply.ClientSeqs, shard}
 				kv.sendGotShard(shard, gid)
 				return
 			}
@@ -613,6 +626,7 @@ func (kv *DisKV) sendGotShard(shard int, gid int64) {
 
 func (kv *DisKV) applyNewShards(newShardOp Op) {
 	kv.Logf("applyNewShards()")
+	kv.clientSeqs = max(kv.clientSeqs, newShardOp.ClientSeqs)
 	ops := newShardOp.ShardOps
 	for _, op := range ops {
 		kv.Logf("Applying shard operation: %o", op)
@@ -1012,7 +1026,7 @@ func (kv *DisKV) recoverDatabaseFromServer() {
 			kv.Logff("nextSeq = %d", kv.nextSeq)
 			d.Decode(&kv.nextConfigNum)
 			kv.Logff("nextConfigNum = %d", kv.nextConfigNum)
-			//d.Decode(&kv.clientSeqs)
+			d.Decode(&kv.clientSeqs)
 			success = true
 			break
 
