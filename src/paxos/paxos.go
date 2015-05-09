@@ -191,6 +191,8 @@ func (px *Paxos) DumpState(dir string) error {
 	e.Encode(px.mins)
 	e.Encode(px.globalMin)
 	e.Encode(px.val)
+	e.Encode(px.n_highest)
+	e.Encode(px.acceptor)
 
 	return ioutil.WriteFile(fullname, w.Bytes(), 0666)
 }
@@ -208,6 +210,8 @@ func (px *Paxos) RecoverState(dir string) error {
 	d.Decode(&px.mins)
 	d.Decode(&px.globalMin)
 	d.Decode(&px.val)
+	d.Decode(&px.n_highest)
+	d.Decode(&px.acceptor)
 
 	return err
 
@@ -299,7 +303,7 @@ func (px *Paxos) Min() int {
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	px.lock.Lock()
 	defer px.lock.Unlock()
-	if seq <= px.globalMin {
+	if seq < px.globalMin {
 		px.Logf("Returning Forgotten from Status(%d)", seq)
 		return Forgotten, nil
 	}

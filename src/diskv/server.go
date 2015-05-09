@@ -24,7 +24,7 @@ import "io/ioutil"
 import "strconv"
 import _ "net/http/pprof"
 
-const Debug = 0
+const Debug = 1
 const DebugFile = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -177,7 +177,7 @@ func (kv *DisKV) sequentialApplier() {
 			kv.ping()
 		}
 
-		kv.Logf("Calling Done(%d)", kv.nextSeq-2)
+		kv.Logf("Calling Done(%d)", kv.nextSeq-1)
 		kv.px.Done(kv.nextSeq - 1)
 	}
 }
@@ -186,10 +186,11 @@ func (kv *DisKV) ping() {
 	kv.Logf("ping()")
 	//Do we have a smaller file?
 
-	if curMin := kv.px.GetGlobalMin(); curMin > kv.paxosMin {
+	kv.Logf("Paxos global min: %d", kv.px.GetGlobalMin())
+	/*if curMin := kv.px.GetGlobalMin(); curMin > kv.paxosMin {
 		kv.writeKeyToDisk("nothing")
 		kv.paxosMin = curMin
-	}
+	}*/
 
 	dummyOp := Op{Type: Get}
 	for !kv.isdead() {
@@ -392,7 +393,6 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 			kv.px.Start(kv.nextSeq, operation)
 			val, _ := kv.waitForPaxos(kv.nextSeq)
 
-			//TODO: Check err
 			if val.(Op).ClientSeq == operation.ClientSeq {
 				kv.Logf("New shards added to paxos")
 				opAddedToPaxos = true
@@ -415,7 +415,6 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 			kv.px.Start(kv.nextSeq, operation)
 			val, _ := kv.waitForPaxos(kv.nextSeq)
 
-			//TODO: Check err
 			if val.(Op).ClientSeq == operation.ClientSeq {
 				kv.Logf("New shards added to paxos")
 				oldShards[operation.Shard] = true
@@ -482,7 +481,6 @@ func (kv *DisKV) newConfigLeader(newShards map[int]bool, oldShards map[int]bool)
 }
 func (kv *DisKV) addToPaxosDuringReconfig(op Op) {
 	for !kv.isdead() {
-		//TODO: Duplicate detection, yes, no?
 
 		kv.px.Start(kv.nextSeq, op)
 		val, err := kv.waitForPaxos(kv.nextSeq)
@@ -492,10 +490,8 @@ func (kv *DisKV) addToPaxosDuringReconfig(op Op) {
 			continue
 		}
 
-		kv.applyOp(val.(Op))
-
-		//TODO: What happens if crash between these two lines?
 		kv.nextSeq++
+		kv.applyOp(val.(Op))
 
 		//Did work?
 		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
@@ -679,7 +675,6 @@ func (kv *DisKV) GetShard(args *GetShardArgs, reply *GetShardReply) error {
 }
 
 func (kv *DisKV) GotShard(args *GotShardArgs, reply *GotShardReply) error {
-	//TODO: Freeze everything when responding? Yes? OMG, can I deadlock?!
 
 	kv.Logf("GotShard()")
 
@@ -695,13 +690,14 @@ func (kv *DisKV) writeKeyToDisk(key string) {
 	kv.Logff("Dumping key %s to disk!", key)
 
 	kv.dumpState()
-	kv.filePut(key2shard(key), kv.encodeKey(key), kv.database[key])
+	if e := kv.filePut(key2shard(key), kv.encodeKey(key), kv.database[key]); e != nil {
+		kv.Logff("Fileput returned error: %s", e)
+	}
 	if e := kv.commitDisk(); e != nil {
 		kv.Logff("Commit returned error: %s", e)
 	}
 
 	//Each time we write to disk, let's make sure the state is consistent
-	//TODO: What happens if it crashes right here?
 }
 
 func (kv *DisKV) commitDisk() error {
@@ -909,7 +905,7 @@ func (kv *DisKV) fileReplaceShard(shard int, m map[string]string) {
 }
 
 func (kv *DisKV) recoverFromDisk() {
-	_, e := os.Stat(kv.dir + "/del")
+	_, e := os.Stat(kv.dir + "/state")
 	if e != nil {
 		kv.Logf("We lost the disk!!", e)
 		kv.recoverAfterLostDisk()
@@ -991,7 +987,8 @@ func (kv *DisKV) recoverDatabaseFromServer() {
 	kv.Logf("Trying to get a database from other servers. Serverlist length %d", len(servers))
 	success := false
 	for !success {
-		for i, srv := range servers {
+		for i := len(servers) - 1; i >= 0; i-- {
+			srv := servers[i]
 			if i == kv.me {
 				continue
 			}
@@ -1115,6 +1112,7 @@ func (kv *DisKV) waitForPaxos(seq int) (val interface{}, err error) {
 //
 func (kv *DisKV) tick() {
 	kv.Logf("Tick()")
+	kv.Logf("Paxos global min: %d", kv.px.GetGlobalMin())
 	newConfig := kv.sm.Query(-1)
 	if newConfig.Num == -1 || newConfig.Num == kv.nextConfigNum-1 {
 		return
@@ -1242,7 +1240,8 @@ func StartServer(gid int64, shardmasters []string,
 
 	kv.Logf("Starting sequential applier")
 
-	kv.writeInitialState()
+	//kv.writeInitialState()
+	kv.writeKeyToDisk("nokey")
 
 	go kv.sequentialApplier()
 
