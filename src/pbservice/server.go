@@ -202,6 +202,7 @@ func (pb *PBServer) kill() {
 	pb.l.Close()
 }
 
+// call this to find out if the server is dead.
 func (pb *PBServer) isdead() bool {
 	return atomic.LoadInt32(&pb.dead) != 0
 }
