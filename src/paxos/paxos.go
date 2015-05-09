@@ -90,7 +90,7 @@ type Paxos struct {
 type PrepareArgs struct {
 	N      int
 	Seq    int
-	Min    int
+	Mins   []int
 	Peer_n int
 }
 
@@ -98,7 +98,7 @@ type AcceptArgs struct {
 	N      int
 	V      interface{}
 	Seq    int
-	Min    int
+	Mins   []int
 	Peer_n int
 }
 
@@ -106,19 +106,19 @@ type PrepAcceptRet struct {
 	OK     bool
 	N_a    int
 	V_a    interface{}
-	Min    int
+	Mins   []int
 	Peer_n int
 }
 
 type DecidedArgs struct {
 	Value  interface{}
 	Seq    int
-	Min    int
+	Mins   []int
 	Peer_n int
 }
 type DecidedRet struct {
 	OK     bool
-	Min    int
+	Mins   []int
 	Peer_n int
 }
 
@@ -205,6 +205,10 @@ func (px *Paxos) RecoverState(dir string) error {
 
 	return err
 
+}
+
+func (px *Paxos) GetGlobalMin() int {
+	return px.globalMin
 }
 
 //
@@ -307,19 +311,27 @@ func rndAbove(n int) int {
 	return int(value)
 }
 
-func (px *Paxos) minFromPeer(newMin int, peer int) {
+func (px *Paxos) minFromPeer(newMins []int, peer int) {
 	px.lock.Lock()
 	defer px.lock.Unlock()
 
-	if newMin > px.mins[peer] {
-		px.Logf("New min from %d: %d \n", peer, newMin)
-		px.mins[peer] = newMin
-		px.updateGlobalMin()
+	update := false
+	for i, v := range newMins {
+
+		if v > px.mins[i] {
+			px.Logf("New min from %d: %d \n", i, v)
+			px.mins[i] = v
+			update = true
+		}
 	}
 
+	if update {
+		px.updateGlobalMin()
+	}
 }
 
 func (px *Paxos) updateGlobalMin() {
+	px.Logf("updateGlobalMin: %d! %v\n", px.globalMin, px.mins)
 	oldGlobalMin := px.globalMin
 	maxInt := int(^uint(0) >> 1)
 	currentGlobalMin := maxInt
@@ -376,11 +388,11 @@ func (px *Paxos) attemptRPCMajority(rpcname string, args interface{}) (majority 
 				highest_n = resp.N_a
 				highest_v = resp.V_a
 			}
-			px.minFromPeer(resp.Min, resp.Peer_n)
+			px.minFromPeer(resp.Mins, resp.Peer_n)
 
 		case resp := <-notOkResponses:
 			numberNotOk++
-			px.minFromPeer(resp.Min, resp.Peer_n)
+			px.minFromPeer(resp.Mins, resp.Peer_n)
 		case <-time.After(1 * time.Second):
 			//Timeout!
 			numberNotOk++
@@ -471,7 +483,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 		px.lock.Lock()
 		n := rndAbove(px.n_highest[Seq])
 
-		prepArgs := PrepareArgs{n, Seq, px.mins[px.me], px.me}
+		prepArgs := PrepareArgs{n, Seq, px.mins, px.me}
 		px.lock.Unlock()
 
 		prepMajority, highest_n, highest_v := px.attemptRPCMajority("Paxos.Prepare", prepArgs)
@@ -505,7 +517,7 @@ func (px *Paxos) Propose(val interface{}, Seq int) {
 				decidedArgs := DecidedArgs{
 					Value:  highest_v,
 					Seq:    Seq,
-					Min:    px.mins[px.me],
+					Mins:   px.mins,
 					Peer_n: px.me}
 				px.lock.Unlock()
 
@@ -538,7 +550,7 @@ func (px *Paxos) sendDecided(args DecidedArgs, ret DecidedRet, peer string) {
 	ok := call(peer, "Paxos.Decided", args, &ret)
 
 	if ok {
-		px.minFromPeer(ret.Min, ret.Peer_n)
+		px.minFromPeer(ret.Mins, ret.Peer_n)
 	}
 
 }
@@ -562,7 +574,7 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 	}
 
 	ret.OK = true
-	ret.Min = px.mins[px.me]
+	ret.Mins = px.mins
 	ret.Peer_n = px.me
 
 	px.lock.Unlock()
@@ -572,11 +584,11 @@ func (px *Paxos) Decided(args DecidedArgs, ret *DecidedRet) (err error) {
 func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 	//	px.Logf("Prepare(%d)\n", args.Seq)
 
-	px.minFromPeer(args.Min, args.Peer_n)
+	px.minFromPeer(args.Mins, args.Peer_n)
 
 	//For memory management
 	px.lock.Lock()
-	ret.Min = px.mins[px.me]
+	ret.Mins = px.mins
 	ret.Peer_n = px.me
 
 	if args.Seq > px.maxSeq {
@@ -621,7 +633,7 @@ func (px *Paxos) Prepare(args PrepareArgs, ret *PrepAcceptRet) (err error) {
 func (px *Paxos) Accept(args AcceptArgs, ret *PrepAcceptRet) (err error) {
 	//	px.Logf("Accept(%d)\n", args.Seq)
 
-	px.minFromPeer(args.Min, args.Peer_n)
+	px.minFromPeer(args.Mins, args.Peer_n)
 
 	px.lock.Lock()
 

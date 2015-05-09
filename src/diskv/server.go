@@ -24,8 +24,8 @@ import "io/ioutil"
 import "strconv"
 import _ "net/http/pprof"
 
-const Debug = 1
-const DebugFile = 1
+const Debug = 0
+const DebugFile = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -75,6 +75,7 @@ type DisKV struct {
 	lastKeyTempPath string
 
 	paxosFastForward chan bool
+	paxosMin         int
 }
 
 var log_mu sync.Mutex
@@ -170,7 +171,7 @@ func (kv *DisKV) sequentialApplier() {
 				opreq.errChan <- OK
 			}
 
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 			kv.Logf("Ping")
 			kv.ping()
 		}
@@ -180,22 +181,33 @@ func (kv *DisKV) sequentialApplier() {
 	}
 }
 
-//Takes the last non-applied seq and returns the new one
 func (kv *DisKV) ping() {
+	kv.Logf("ping()")
+	//Do we have a smaller file?
+
+	if curMin := kv.px.GetGlobalMin(); curMin > kv.paxosMin {
+		kv.writeKeyToDisk("nothing")
+		kv.paxosMin = curMin
+	}
+
 	dummyOp := Op{Type: Get}
 	for !kv.isdead() {
+		kv.Logf("getting status from %d", kv.nextSeq)
 		fate, val := kv.px.Status(kv.nextSeq)
 
 		if fate == paxos.Decided {
 			kv.nextSeq++
 			kv.applyOp(val.(Op))
+			kv.px.Done(kv.nextSeq - 1)
 			continue
 		}
 
 		if kv.px.Max() > kv.nextSeq && kv.nextSeq > kv.lastDummySeq {
+			kv.Logf("Starting dummy operation! %d", kv.nextSeq)
 			kv.px.Start(kv.nextSeq, dummyOp)
 			kv.waitForPaxos(kv.nextSeq)
 			kv.lastDummySeq = kv.nextSeq
+			kv.px.Done(kv.nextSeq - 1)
 		} else {
 			return
 		}
@@ -712,6 +724,10 @@ func (kv *DisKV) commitDisk() error {
 		return e
 	}
 
+	//Remove token
+	if e := os.RemoveAll(kv.tempDir()); e != nil {
+		return e
+	}
 	return nil
 }
 
@@ -939,18 +955,13 @@ func (kv *DisKV) recoverAfterLostDisk() {
 	kv.currentConfig = kv.sm.Query(-1)
 	kv.Logf("Got a config!")
 
-	//Set paxos to non-voting
-
 	//Get database from another server (I don't think it's possible to get a stale database becuase how paxos Done() works)
 
 	kv.recoverDatabaseFromServer()
 
-	//Set correct seq according to database
-	//Set correct config according to the database we got
-
 	kv.reapplyConfig(kv.nextConfigNum - 1)
 
-	kv.paxosFastForward <- true
+	//kv.paxosFastForward <- true
 
 }
 
@@ -1107,6 +1118,7 @@ func (kv *DisKV) tick() {
 	kv.opReqChan <- opReq
 
 	kv.nextConfigNum++
+
 }
 
 // tell the server to shut itself down.
