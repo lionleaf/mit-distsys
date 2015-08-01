@@ -24,8 +24,8 @@ import "io/ioutil"
 import "strconv"
 import _ "net/http/pprof"
 
-const Debug = 1
-const DebugFile = 1
+const Debug = 0
+const DebugFile = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -172,7 +172,7 @@ func (kv *DisKV) sequentialApplier() {
 				opreq.errChan <- OK
 			}
 
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(1000 * time.Millisecond):
 			kv.Logf("Ping")
 			kv.ping()
 		}
@@ -187,10 +187,10 @@ func (kv *DisKV) ping() {
 	//Do we have a smaller file?
 
 	kv.Logf("Paxos global min: %d", kv.px.GetGlobalMin())
-	/*if curMin := kv.px.GetGlobalMin(); curMin > kv.paxosMin {
+	if curMin := kv.px.GetGlobalMin(); curMin > kv.paxosMin {
 		kv.writeKeyToDisk("nothing")
 		kv.paxosMin = curMin
-	}*/
+	}
 
 	dummyOp := Op{Type: Get}
 	for !kv.isdead() {
@@ -200,10 +200,11 @@ func (kv *DisKV) ping() {
 		if fate == paxos.Decided {
 			kv.nextSeq++
 			kv.applyOp(val.(Op))
+			kv.px.Done(kv.nextSeq - 1)
 			continue
 		}
 
-		if kv.px.Max() > kv.nextSeq && kv.nextSeq > kv.lastDummySeq {
+		if kv.px.Max() >= kv.nextSeq && kv.nextSeq > kv.lastDummySeq {
 			kv.Logf("Starting dummy operation! %d", kv.nextSeq)
 			kv.px.Start(kv.nextSeq, dummyOp)
 			kv.waitForPaxos(kv.nextSeq)
@@ -237,6 +238,7 @@ func (kv *DisKV) addToPaxos(op Op) {
 
 		kv.nextSeq++
 		kv.applyOp(val.(Op))
+		kv.px.Done(kv.nextSeq - 1)
 
 		//Did work?
 		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
@@ -492,6 +494,7 @@ func (kv *DisKV) addToPaxosDuringReconfig(op Op) {
 
 		kv.nextSeq++
 		kv.applyOp(val.(Op))
+		kv.px.Done(kv.nextSeq - 1)
 
 		//Did work?
 		if val.(Op).Client == op.Client && val.(Op).ClientSeq == op.ClientSeq {
@@ -627,6 +630,7 @@ func (kv *DisKV) applyNewShards(newShardOp Op) {
 	for _, op := range ops {
 		kv.Logf("Applying shard operation: %o", op)
 		kv.applyOp(op.(Op))
+		kv.px.Done(kv.nextSeq - 1)
 	}
 }
 
